@@ -39,7 +39,7 @@ jobs:
           powershell -ExecutionPolicy Bypass -File scripts/prepare-bundle.ps1
 
       - name: Build Tauri App
-        uses: tauri-apps/tauri-action@v2
+        uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:

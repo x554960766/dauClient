@@ -222,18 +222,25 @@ pub fn hypervisor_state() -> HypervisorState {
     }
     #[cfg(target_os = "windows")]
     {
-        // 检测 AEHD 驱动服务或 Hyper-V。emulator -accel-check 在 emulator 安装后做最终确认。
+        // 1. 优先检测 Google AEHD 独立驱动服务 (gvm)
         let aehd = std::process::Command::new("sc")
             .args(["query", "gvm"])
             .output()
             .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).contains("RUNNING"))
             .unwrap_or(false);
+
+        // 2. 若 AEHD 未运行，通过 PowerShell 探索 Windows 原生 Hyper-V / 虚拟化支持
         let hyperv = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command",
-                   "(Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-Hypervisor).State"])
+            .args([
+                "-NoProfile",
+                "-Command",
+                "(Get-CimInstance -ClassName Win32_ComputerSystem).HypervisorPresent",
+            ])
             .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).contains("Enabled"))
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains("True"))
             .unwrap_or(false);
+
+        // 3. 汇总状态输出
         HypervisorState {
             platform: "windows".into(),
             ready: aehd || hyperv,

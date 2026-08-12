@@ -355,7 +355,8 @@ pub async fn pilot_run(app: AppHandle, state: SharedState, mut cfg: EngineConfig
         };
         emulator.boot(&avd_name, port, &opts).await.map_err(|e| e.to_string())?;
         tracing::info!("[Pilot] 等待 QEMU 模拟器开机 (sys.boot_completed=1)...");
-        adb.wait_boot(&serial, Duration::from_secs(cfg.boot_timeout_s as u64)).await.map_err(|e| e.to_string())?;
+        let timeout_s = (cfg.boot_timeout_s as u64).max(120);
+        adb.wait_boot(&serial, Duration::from_secs(timeout_s)).await.map_err(|e| e.to_string())?;
 
         tracing::info!("[Pilot] 模拟器开机完成，准备进行设备型号与指纹伪装...");
         // 动态覆盖真机设备型号（修改 build.prop 并重载）

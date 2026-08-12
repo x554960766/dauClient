@@ -486,7 +486,7 @@ impl Emulator {
         let gpu_mode = if cfg!(target_os = "macos") {
             "host"
         } else if cfg!(target_os = "windows") {
-            "auto"
+            "swiftshader_indirect"
         } else {
             "swiftshader_indirect"
         };

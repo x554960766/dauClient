@@ -59,7 +59,9 @@ impl AvdManager {
 
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
-            let _ = stdin.write_all(b"no\n").await;
+            let _ = stdin.write_all(b"no\r\n").await;
+            let _ = stdin.flush().await;
+            drop(stdin);
         }
         let out = child.wait_with_output().await.map_err(|e| AvdError::Io(e.to_string()))?;
         if !out.status.success() {

@@ -33,6 +33,11 @@ impl AdbEnv {
         cmd.env("ANDROID_SDK_HOME", &self.sdk_dir); // 关键：否则 avdmanager 仍写用户 ~/.android
         cmd.env("ANDROID_AVD_HOME", self.sdk_dir.join("avd-home"));
         cmd.env("JAVA_HOME", crate::sdkmgr::jre_home(&self.sdk_dir));
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
     }
 }
 

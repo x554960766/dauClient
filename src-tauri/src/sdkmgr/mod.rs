@@ -222,20 +222,25 @@ pub fn hypervisor_state() -> HypervisorState {
     }
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
         // 1. 优先检测 Google AEHD 独立驱动服务 (gvm)
-        let aehd = std::process::Command::new("sc")
-            .args(["query", "gvm"])
+        let mut sc_cmd = std::process::Command::new("sc");
+        sc_cmd.args(["query", "gvm"]).creation_flags(0x08000000);
+        let aehd = sc_cmd
             .output()
             .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).contains("RUNNING"))
             .unwrap_or(false);
 
         // 2. 若 AEHD 未运行，通过 PowerShell 探索 Windows 原生 Hyper-V / 虚拟化支持
-        let hyperv = std::process::Command::new("powershell")
+        let mut ps_cmd = std::process::Command::new("powershell");
+        ps_cmd
             .args([
                 "-NoProfile",
                 "-Command",
                 "(Get-CimInstance -ClassName Win32_ComputerSystem).HypervisorPresent",
             ])
+            .creation_flags(0x08000000);
+        let hyperv = ps_cmd
             .output()
             .map(|o| String::from_utf8_lossy(&o.stdout).contains("True"))
             .unwrap_or(false);

@@ -3,6 +3,7 @@
 # Usage: From project root: powershell -ExecutionPolicy Bypass -File scripts\prepare-bundle.ps1
 # Proxy: $env:HTTPS_PROXY="http://127.0.0.1:7897"
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = Split-Path -Parent $ScriptDir
@@ -30,21 +31,21 @@ New-Item -ItemType File -Force -Path (Join-Path $BundleDir ".gitkeep") | Out-Nul
 
 # ---- 1. cmdline-tools ----
 Write-Host "==> [1/5] Downloading cmdline-tools..."
-Invoke-WebRequest -Uri "https://dl.google.com/android/repository/commandlinetools-win-11076708_latest.zip" -OutFile "$Tmp\cmdline.zip"
+Invoke-WebRequest -UseBasicParsing -Uri "https://dl.google.com/android/repository/commandlinetools-win-11076708_latest.zip" -OutFile "$Tmp\cmdline.zip"
 Expand-Archive -Path "$Tmp\cmdline.zip" -DestinationPath "$Tmp\cmdline-extract" -Force
 New-Item -ItemType Directory -Force -Path "$BundleDir\cmdline-tools" | Out-Null
 Move-Item "$Tmp\cmdline-extract\cmdline-tools" "$BundleDir\cmdline-tools\latest"
 
 # ---- 2. JRE ----
 Write-Host "==> [2/5] Downloading JRE (Temurin 17 $JreArch)..."
-Invoke-WebRequest -Uri "https://api.adoptium.net/v3/binary/latest/17/ga/windows/$JreArch/jre/hotspot/normal/eclipse" -OutFile "$Tmp\jre.zip"
+Invoke-WebRequest -UseBasicParsing -Uri "https://api.adoptium.net/v3/binary/latest/17/ga/windows/$JreArch/jre/hotspot/normal/eclipse" -OutFile "$Tmp\jre.zip"
 Expand-Archive -Path "$Tmp\jre.zip" -DestinationPath "$Tmp\jre-extract" -Force
 $jreDir = Get-ChildItem "$Tmp\jre-extract" -Directory | Select-Object -First 1
 Move-Item $jreDir.FullName "$BundleDir\jre"
 
 # ---- 3. platform-tools ----
 Write-Host "==> [3/5] Downloading platform-tools..."
-Invoke-WebRequest -Uri "https://dl.google.com/android/repository/platform-tools-latest-windows.zip" -OutFile "$Tmp\platform-tools.zip"
+Invoke-WebRequest -UseBasicParsing -Uri "https://dl.google.com/android/repository/platform-tools-latest-windows.zip" -OutFile "$Tmp\platform-tools.zip"
 Expand-Archive -Path "$Tmp\platform-tools.zip" -DestinationPath $BundleDir -Force
 
 # ---- 4. write license files ----

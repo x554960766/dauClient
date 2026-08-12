@@ -35,7 +35,6 @@ impl AdbEnv {
         cmd.env("JAVA_HOME", crate::sdkmgr::jre_home(&self.sdk_dir));
         #[cfg(target_os = "windows")]
         {
-            use std::os::windows::process::CommandExt;
             cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
         }
     }

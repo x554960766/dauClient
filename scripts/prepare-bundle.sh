@@ -70,11 +70,11 @@ printf '33b6a2b64607f11b759f320ef9dff4ae5c47d97a\n' > "$BUNDLE_DIR/licenses/goog
 printf 'e9acab5b5fbb560a72cfaecce8946896ff6aab9d\n' > "$BUNDLE_DIR/licenses/mips-android-sysimage-license"
 printf 'd975f751698a77b662f1254ddbeed3901e976f5a\n' > "$BUNDLE_DIR/licenses/intel-android-extra-license"
 
-# ---- 5. emulator + build-tools + system-images (via sdkmanager) ----
-echo "==> [5/5] 安装 emulator + build-tools + $SYS_IMAGE (via sdkmanager)..."
+# ---- 5. emulator + build-tools (via sdkmanager) ----
+echo "==> [5/5] 安装 emulator + build-tools (via sdkmanager)..."
 export JAVA_HOME="$BUNDLE_DIR/jre/Contents/Home"
 SDKMGR="$BUNDLE_DIR/cmdline-tools/latest/bin/sdkmanager"
-"$SDKMGR" --sdk_root="$BUNDLE_DIR" "emulator" "build-tools;34.0.0" "$SYS_IMAGE"
+"$SDKMGR" --sdk_root="$BUNDLE_DIR" "emulator" "build-tools;34.0.0"
 
 # 修复 UNIX 可执行权限
 chmod -R +x "$BUNDLE_DIR/cmdline-tools/latest/bin/"* 2>/dev/null || true

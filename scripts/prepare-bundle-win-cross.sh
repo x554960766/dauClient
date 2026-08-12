@@ -64,7 +64,7 @@ printf 'e9acab5b5fbb560a72cfaecce8946896ff6aab9d\n' > "$BUNDLE_DIR/licenses/mips
 printf 'd975f751698a77b662f1254ddbeed3901e976f5a\n' > "$BUNDLE_DIR/licenses/intel-android-extra-license"
 
 # ---- 5. 用本地/宿主 sdkmanager 下载 Windows 镜像与组件 ----
-echo "==> [5/5] 安装 Windows emulator, build-tools, x86_64 系统镜像..."
+echo "==> [5/5] 安装 Windows emulator, build-tools..."
 # 如果宿主有 sdkmanager 则用宿主的 sdkmanager 下载指定平台镜像
 SDKMGR=""
 if [ -x "$HOME/Library/Caches/umeng-dau-client/sdk/cmdline-tools/latest/bin/sdkmanager" ]; then
@@ -73,7 +73,7 @@ if [ -x "$HOME/Library/Caches/umeng-dau-client/sdk/cmdline-tools/latest/bin/sdkm
 fi
 
 if [ -n "$SDKMGR" ]; then
-  "$SDKMGR" --sdk_root="$BUNDLE_DIR" "emulator" "build-tools;34.0.0" "$SYS_IMAGE"
+  "$SDKMGR" --sdk_root="$BUNDLE_DIR" "emulator" "build-tools;34.0.0"
 else
   echo "提示: 未检测到宿主 sdkmanager，请在 Windows 机器上直接运行 prepare-bundle.ps1"
 fi

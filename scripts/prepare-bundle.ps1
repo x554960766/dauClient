@@ -60,11 +60,11 @@ Set-Content -Path "$LicDir\google-gdk-license" -Value "33b6a2b64607f11b759f320ef
 Set-Content -Path "$LicDir\mips-android-sysimage-license" -Value "e9acab5b5fbb560a72cfaecce8946896ff6aab9d" -NoNewline
 Set-Content -Path "$LicDir\intel-android-extra-license" -Value "d975f751698a77b662f1254ddbeed3901e976f5a" -NoNewline
 
-# ---- 5. emulator + build-tools + system-images ----
-Write-Host "==> [5/5] 安装 emulator + build-tools + $SysImage (via sdkmanager)..."
+# ---- 5. emulator + build-tools ----
+Write-Host "==> [5/5] 安装 emulator + build-tools (via sdkmanager)..."
 $env:JAVA_HOME = "$BundleDir\jre"
 $Sdkmgr = "$BundleDir\cmdline-tools\latest\bin\sdkmanager.bat"
-& $Sdkmgr --sdk_root="$BundleDir" "emulator" "build-tools;34.0.0" "$SysImage"
+& $Sdkmgr --sdk_root="$BundleDir" "emulator" "build-tools;34.0.0"
 
 # 清理
 Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue

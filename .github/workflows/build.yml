@@ -55,6 +55,6 @@ jobs:
           releaseName: 'umeng-dau-client v__VERSION__'
           releaseBody: |
             ## Windows 安装包
-            下载 `.exe` 或 `.msi` 安装后，将安卓系统镜像 ZIP 放入「下载」文件夹，打开应用点击初始化即可。
-          releaseDraft: true
+            下载 `.exe` 安装包运行，将安卓系统镜像 ZIP 放入「下载」文件夹，打开应用点击初始化即可。
+          releaseDraft: false
           prerelease: false

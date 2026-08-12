@@ -484,7 +484,7 @@ impl Emulator {
         let gpu_mode = if cfg!(target_os = "macos") {
             "host"
         } else if cfg!(target_os = "windows") {
-            "angle_indirect"
+            "auto"
         } else {
             "swiftshader_indirect"
         };
@@ -492,6 +492,8 @@ impl Emulator {
         cmd.args([
             "-avd", avd,
             "-port", &port.to_string(),
+            "-accel", "auto",
+            "-cores", "2",
             "-no-window",
             "-no-audio",
             "-no-snapshot",

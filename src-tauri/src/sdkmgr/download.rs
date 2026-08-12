@@ -334,6 +334,109 @@ pub async fn sdkmanager_install(
     Ok(())
 }
 
+/// 在本地常用目录下检索预下载的安卓系统镜像（ZIP 包或已解压的目录）
+fn find_local_system_image(api_level: u32, sdk_dir: &Path) -> Option<PathBuf> {
+    let (_, arch) = host_platform();
+    let abi_keyword = if arch == "arm64" { "arm64" } else { "x86_64" };
+    let api_keyword = format!("android-{}", api_level);
+    let api_alt_keyword = format!("-{}-", api_level); // 例如 -34-
+
+    let mut search_paths = Vec::new();
+
+    // 1. 运行的可执行文件所在目录及其父/祖父目录（开发与运行环境）
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            search_paths.push(exe_dir.to_path_buf());
+            if let Some(parent) = exe_dir.parent() {
+                search_paths.push(parent.to_path_buf());
+                if let Some(gparent) = parent.parent() {
+                    search_paths.push(gparent.to_path_buf());
+                }
+            }
+        }
+    }
+
+    // 2. SDK 根目录
+    search_paths.push(sdk_dir.to_path_buf());
+
+    // 3. 用户系统的 Downloads 目录
+    if let Some(download_dir) = dirs::download_dir() {
+        search_paths.push(download_dir);
+    }
+
+    for path in &search_paths {
+        if !path.exists() {
+            continue;
+        }
+
+        // 检查是否有解压好的镜像目录（如 x86_64/system.img）
+        let direct_dir = path.join(abi_keyword);
+        if direct_dir.exists() && direct_dir.join("system.img").exists() && direct_dir.join("source.properties").exists() {
+            return Some(direct_dir);
+        }
+
+        let direct_dir_alt = path.join(if arch == "arm64" { "arm64-v8a" } else { "x86_64" });
+        if direct_dir_alt.exists() && direct_dir_alt.join("system.img").exists() && direct_dir_alt.join("source.properties").exists() {
+            return Some(direct_dir_alt);
+        }
+
+        // 搜索符合匹配命名规则的 zip 压缩包
+        if let Ok(entries) = std::fs::read_dir(path) {
+            for entry in entries.flatten() {
+                let file_path = entry.path();
+                if file_path.is_file() && file_path.extension().map_or(false, |ext| ext == "zip") {
+                    let file_name = file_path.file_name().unwrap().to_string_lossy().to_lowercase();
+                    let has_abi = file_name.contains(abi_keyword) || (abi_keyword == "x86_64" && file_name.contains("x86"));
+                    let has_api = file_name.contains(&api_keyword) || file_name.contains(&api_alt_keyword) || file_name.contains(&api_level.to_string());
+                    
+                    if has_abi && has_api {
+                        tracing::info!("Found local system image zip: {:?}", file_path);
+                        return Some(file_path);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// 解压系统镜像 zip 文件到目标目录，智能剥离一级 abi 目录以符合 sdk 目录结构
+async fn unzip_system_image_zip(zip_path: &Path, target_dir: &Path) -> Result<(), SetupError> {
+    let zip_path = zip_path.to_path_buf();
+    let target_dir = target_dir.to_path_buf();
+    
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::File::open(&zip_path)?;
+        let mut archive = zip::ZipArchive::new(file).map_err(|e| SetupError::Unzip(e.to_string()))?;
+        
+        let abi_name = target_dir.file_name().ok_or_else(|| SetupError::Unzip("Invalid target dir".into()))?;
+        let abi_str = abi_name.to_string_lossy();
+        
+        let mut has_abi_prefix = false;
+        if archive.len() > 0 {
+            if let Ok(first_file) = archive.by_index(0) {
+                let name = first_file.name();
+                if name.starts_with(&format!("{}/", abi_str)) || name.starts_with(&format!("{}\\", abi_str)) {
+                    has_abi_prefix = true;
+                }
+            }
+        }
+        
+        let extract_dest = if has_abi_prefix {
+            target_dir.parent().ok_or_else(|| SetupError::Unzip("Invalid target parent dir".into()))?
+        } else {
+            &target_dir
+        };
+        
+        std::fs::create_dir_all(extract_dest)?;
+        archive.extract(extract_dest).map_err(|e| SetupError::Unzip(e.to_string()))?;
+        Ok::<(), SetupError>(())
+    })
+    .await
+    .map_err(|e| SetupError::Unzip(format!("Unzip thread panicked: {}", e)))?
+}
+
 /// 一键补齐缺失组件（SetupWizard「开始初始化」按钮）
 /// v1.2: 优先从打包内置 bundle 部署，跳过 ~650MB 网络下载。
 /// 系统镜像（~1.5GB）始终按需下载（与 API level 绑定，不打包）。
@@ -356,7 +459,21 @@ pub async fn ensure_components(
             // 只需补系统镜像
             for api in api_levels {
                 let img = system_image_id(*api);
-                if !super::system_image_dir(sdk_dir, &img).exists() {
+                let target_dir = super::system_image_dir(sdk_dir, &img);
+                if !target_dir.exists() {
+                    // 尝试本地检测与安装
+                    if let Some(local_path) = find_local_system_image(*api, sdk_dir) {
+                        emit_progress(app, &format!("image-{}", api), 10, "extracting");
+                        let success = if local_path.is_dir() {
+                            copy_dir_recursive(&local_path, &target_dir).is_ok()
+                        } else {
+                            unzip_system_image_zip(&local_path, &target_dir).await.is_ok()
+                        };
+                        if success {
+                            emit_progress(app, &format!("image-{}", api), 100, "ready");
+                            continue;
+                        }
+                    }
                     sdkmanager_install(app, sdk_dir, std::slice::from_ref(&img), env_overrides, &format!("image-{}", api)).await?;
                 }
             }
@@ -382,12 +499,27 @@ pub async fn ensure_components(
     }
     for api in api_levels {
         let img = system_image_id(*api);
-        if !super::system_image_dir(sdk_dir, &img).exists() {
+        let target_dir = super::system_image_dir(sdk_dir, &img);
+        if !target_dir.exists() {
+            // 尝试本地检测与安装
+            if let Some(local_path) = find_local_system_image(*api, sdk_dir) {
+                emit_progress(app, &format!("image-{}", api), 10, "extracting");
+                let success = if local_path.is_dir() {
+                    copy_dir_recursive(&local_path, &target_dir).is_ok()
+                } else {
+                    unzip_system_image_zip(&local_path, &target_dir).await.is_ok()
+                };
+                if success {
+                    emit_progress(app, &format!("image-{}", api), 100, "ready");
+                    continue;
+                }
+            }
             sdkmanager_install(app, sdk_dir, std::slice::from_ref(&img), env_overrides, &format!("image-{}", api)).await?;
         }
     }
     Ok(())
 }
+
 
 /// 组件状态 -> 前端展示用
 pub fn state_label(s: &ComponentState) -> String {

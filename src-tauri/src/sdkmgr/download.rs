@@ -273,6 +273,15 @@ pub async fn deploy_from_bundle(
         return Ok(false);
     }
 
+    // 如果 SDK 目录已经完整部署，直接跳过再次解压，防止 Windows 平台因程序正在运行导致 remove_dir_all 报 Access Denied
+    if sdk_dir.join("cmdline-tools/latest/bin").exists()
+        && sdk_dir.join("platform-tools").exists()
+        && sdk_dir.join("emulator").exists()
+    {
+        emit_progress(app, "bundle", 100, "ready");
+        return Ok(true);
+    }
+
     emit_progress(app, "bundle", 0, "deploying");
 
     let bundle = bundle.to_path_buf();
@@ -280,7 +289,7 @@ pub async fn deploy_from_bundle(
     let result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
         // 清理旧 sdk_dir（可能有空目录或上次失败残留）
         if sdk_dir.exists() {
-            std::fs::remove_dir_all(&sdk_dir)?;
+            let _ = std::fs::remove_dir_all(&sdk_dir);
         }
         std::fs::create_dir_all(sdk_dir.parent().unwrap_or(&sdk_dir))?;
         copy_dir_recursive(&bundle, &sdk_dir)?;

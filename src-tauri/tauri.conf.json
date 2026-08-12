@@ -33,6 +33,11 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": ["sdk-bundle/**/*"]
+    "resources": ["sdk-bundle/**/*"],
+    "windows": {
+      "nsis": {
+        "compression": "zlib"
+      }
+    }
   }
 }

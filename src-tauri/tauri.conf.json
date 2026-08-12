@@ -25,7 +25,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app"],
+    "targets": "all",
     "icon": [],
     "resources": ["sdk-bundle/**/*"]
   }

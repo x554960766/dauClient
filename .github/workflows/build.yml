@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  release:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: 'windows-latest'
+            os-name: 'windows'
+            args: ''
+          - platform: 'macos-latest'
+            os-name: 'macos'
+            args: ''
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install frontend dependencies
+        run: npm install
+
+      # Prepare SDK Bundle for Windows
+      - name: Prepare Windows SDK Bundle
+        if: matrix.os-name == 'windows'
+        run: |
+          powershell -ExecutionPolicy Bypass -File scripts/prepare-bundle.ps1
+
+      # Prepare SDK Bundle for macOS
+      - name: Prepare macOS SDK Bundle
+        if: matrix.os-name == 'macos'
+        run: |
+          sh scripts/prepare-bundle.sh
+
+      # Build Tauri App and create Release/Draft
+      - name: Build Tauri App
+        uses: tauri-apps/tauri-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__
+          releaseName: 'App Release v__VERSION__'
+          releaseBody: 'See the assets below to download.'
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}

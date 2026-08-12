@@ -34,7 +34,15 @@ jobs:
       - name: Install frontend dependencies
         run: npm install
 
+      - name: Cache SDK Bundle
+        id: cache-sdk-bundle
+        uses: actions/cache@v4
+        with:
+          path: src-tauri/sdk-bundle
+          key: ${{ runner.os }}-sdk-bundle-${{ hashFiles('scripts/prepare-bundle.ps1') }}
+
       - name: Prepare Windows SDK Bundle
+        if: steps.cache-sdk-bundle.outputs.cache-hit != 'true'
         run: |
           powershell -ExecutionPolicy Bypass -File scripts/prepare-bundle.ps1
 

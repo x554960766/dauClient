@@ -119,6 +119,29 @@ pub async fn batch_stop(state: State<'_, SharedState>, run_id: String) -> Result
     Ok(())
 }
 
+// ---------------- 手机 USB 换 IP ----------------
+
+#[tauri::command]
+pub async fn detect_usb_phones(state: State<'_, SharedState>) -> Result<Vec<crate::adb::rotate_ip::UsbPhoneInfo>, String> {
+    Ok(crate::adb::rotate_ip::detect_usb_phones(&state.sdk_dir).await)
+}
+
+#[tauri::command]
+pub async fn test_rotate_ip(
+    state: State<'_, SharedState>,
+    serial: Option<String>,
+    disconnect_wait_s: Option<u32>,
+    reconnect_wait_s: Option<u32>,
+) -> Result<crate::adb::rotate_ip::RotateIpResult, String> {
+    crate::adb::rotate_ip::rotate_ip_via_adb(
+        &state.sdk_dir,
+        serial.as_deref(),
+        disconnect_wait_s.unwrap_or(4),
+        reconnect_wait_s.unwrap_or(6),
+        None,
+    ).await
+}
+
 // ---------------- 清理与报告 ----------------
 
 #[tauri::command]
@@ -171,4 +194,87 @@ pub async fn list_runs(state: State<'_, SharedState>) -> Result<Vec<String>, Str
     }
     runs.sort_by(|a, b| b.cmp(a));
     Ok(runs)
+}
+
+// ---------------- 设备池管理（留存方案）----------------
+
+#[tauri::command]
+pub async fn pool_status(state: State<'_, SharedState>) -> Result<crate::engine::pool::DevicePool, String> {
+    Ok(crate::engine::pool::DevicePool::load(&state.pool_file).await)
+}
+
+#[tauri::command]
+pub async fn pool_clear(state: State<'_, SharedState>) -> Result<usize, String> {
+    let pool = crate::engine::pool::DevicePool::load(&state.pool_file).await;
+    let count = pool.len();
+
+    // 删除池中所有 AVD
+    let sdk = state.sdk_dir.clone();
+    let adb = crate::adb::Adb::new(&sdk, state.adb_server_port);
+    let avdm = crate::avd::AvdManager::new(&sdk, adb.env().clone());
+    for dev in &pool.devices {
+        tracing::info!(avd = %dev.avd_name, "清理设备池 AVD");
+        let _ = avdm.delete(&dev.avd_name).await;
+        crate::avd::clean_avd_lock_files(&dev.avd_name);
+    }
+
+    // 清空池文件
+    let empty = crate::engine::pool::DevicePool::default();
+    let _ = empty.save(&state.pool_file).await;
+
+    Ok(count)
+}
+
+// ---------------- 身份档案库管理（300+ 留存方案 A）----------------
+
+#[tauri::command]
+pub async fn list_profiles(
+    state: State<'_, SharedState>,
+) -> Result<Vec<crate::engine::profile_archive::IdentityProfile>, String> {
+    Ok(crate::engine::profile_archive::ProfileArchiveManager::load_all(&state.profiles_dir).await)
+}
+
+#[tauri::command]
+pub async fn clear_profiles(state: State<'_, SharedState>) -> Result<usize, String> {
+    crate::engine::profile_archive::ProfileArchiveManager::clear(&state.profiles_dir)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+// ---------------- 动态档案堆栈管理（300 容量 FIFO + 防重）----------------
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct StackStatusReport {
+    pub capacity: usize,
+    pub total_entries: usize,
+    pub available_today: usize,
+    pub used_today: usize,
+    pub last_cleared_date: Option<String>,
+}
+
+#[tauri::command]
+pub async fn get_stack_status(state: State<'_, SharedState>) -> Result<StackStatusReport, String> {
+    let mut stack = crate::engine::profile_stack::ProfileStackStore::load(&state.stack_file).await;
+    if stack.check_and_auto_reset() {
+        let _ = stack.save(&state.stack_file).await;
+    }
+
+    let today = crate::engine::profile_stack::ProfileStackStore::beijing_now_info().0;
+    let available = stack.available_count_for_today(&today);
+    let total = stack.entries.len();
+
+    Ok(StackStatusReport {
+        capacity: stack.capacity,
+        total_entries: total,
+        available_today: available,
+        used_today: total.saturating_sub(available),
+        last_cleared_date: stack.last_cleared_date.clone(),
+    })
+}
+
+#[tauri::command]
+pub async fn reset_profile_usage(state: State<'_, SharedState>) -> Result<(), String> {
+    let mut stack = crate::engine::profile_stack::ProfileStackStore::load(&state.stack_file).await;
+    stack.manual_reset();
+    stack.save(&state.stack_file).await.map_err(|e| e.to_string())
 }

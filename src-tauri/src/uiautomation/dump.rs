@@ -62,6 +62,8 @@ pub struct UiNodeOwned {
     pub clickable: bool,
     pub scrollable: bool,
     pub enabled: bool,
+    pub checked: bool,
+    pub checkable: bool,
     pub bounds: Bounds,
     pub depth: u32,
     /// §11.3：nodes 数组下标，用于向上找可点击祖先
@@ -122,6 +124,8 @@ impl UiDump {
                 clickable: b("clickable"),
                 scrollable: b("scrollable"),
                 enabled: n.attribute("enabled") != Some("false"),
+                checked: b("checked"),
+                checkable: b("checkable"),
                 bounds: Bounds::parse(n.attribute("bounds").unwrap_or("")),
                 depth,
                 parent,

@@ -155,6 +155,7 @@ fn detect_privacy_dialog<'a>(
     dump: &'a UiDump,
     cfg: &OnboardingConfig,
     screen: &ScreenInfo,
+    cb_already_clicked: bool,
 ) -> Option<(&'a UiNodeOwned, String)> {
     if !cfg.privacy_dialog.enabled {
         return None;
@@ -193,17 +194,23 @@ fn detect_privacy_dialog<'a>(
 
     // 2.5 优先检测隐私协议弹窗内的「阅读并同意」勾选框（CheckBox）
     // 很多 App（如晨视频）需先勾选同意协议 CheckBox 才能使「同意」按钮生效。
-    // 在 L2.5 新用户模式下初始状态未勾选，直接点击「同意」会被 App 内部 if (!isChecked) return 静默丢弃。
-    let cb_node = dump.nodes.iter().find(|n| {
-        if !n.enabled || n.bounds.area() <= 0 { return false; }
-        let class_lower = n.class.to_lowercase();
-        let id_lower = n.resource_id.to_lowercase();
+    // 在 L2.5/L3 新用户模式下初始状态未勾选，直接点击「同意」会被 App 内部 if (!isChecked) return 静默丢弃。
+    // 关键修正：若节点属性为 checked=true，或在之前轮次已点击过勾选框 (cb_already_clicked=true)，不再重复点击，避免形成死循环。
+    let cb_node = if cb_already_clicked {
+        None
+    } else {
+        dump.nodes.iter().find(|n| {
+            if !n.enabled || n.bounds.area() <= 0 { return false; }
+            if n.checked { return false; }
+            let class_lower = n.class.to_lowercase();
+            let id_lower = n.resource_id.to_lowercase();
 
-        let is_cb_class = class_lower.ends_with("checkbox") || class_lower.ends_with("radiobutton");
-        let is_cb_id = id_lower.ends_with("checkbox") || id_lower.ends_with("cb_agree") || id_lower.ends_with("agree_cb") || id_lower.contains("cb_select");
+            let is_cb_class = class_lower.ends_with("checkbox") || class_lower.ends_with("radiobutton");
+            let is_cb_id = id_lower.ends_with("checkbox") || id_lower.ends_with("cb_agree") || id_lower.ends_with("agree_cb") || id_lower.contains("cb_select");
 
-        is_cb_class || is_cb_id
-    });
+            is_cb_class || is_cb_id
+        })
+    };
 
     // 3. 三级匹配：精确 → starts_with → contains
     let exact_set: Vec<&str> = cfg
@@ -242,11 +249,13 @@ fn detect_privacy_dialog<'a>(
     }
 
     if let Some((btn_target, matched)) = agree_node {
-        // 如果同时存在显式勾选框节点，且勾选框的中心坐标与同意按钮不重合，优先点击勾选框
-        if let Some(cb) = cb_node {
-            let cb_target = dump.resolve_tap_target(cb);
-            if cb_target.bounds.center() != btn_target.bounds.center() {
-                return Some((cb_target, format!("cb_first:{}", matched)));
+        // 如果同时存在未勾选的勾选框节点，且勾选框中心与同意按钮不重合，优先点击勾选框
+        if !cb_already_clicked {
+            if let Some(cb) = cb_node {
+                let cb_target = dump.resolve_tap_target(cb);
+                if cb_target.bounds.center() != btn_target.bounds.center() {
+                    return Some((cb_target, format!("cb_first:{}", matched)));
+                }
             }
         }
         return Some((btn_target, matched));
@@ -259,7 +268,16 @@ fn detect_privacy_dialog<'a>(
             .into_iter()
             .find(|n| !DISAGREE_PATTERNS.iter().any(|p| n.text.contains(p)))
         {
-            return Some((dump.resolve_tap_target(n), format!("id_suffix:{}", hint)));
+            let btn_target = dump.resolve_tap_target(n);
+            if !cb_already_clicked {
+                if let Some(cb) = cb_node {
+                    let cb_target = dump.resolve_tap_target(cb);
+                    if cb_target.bounds.center() != btn_target.bounds.center() {
+                        return Some((cb_target, format!("cb_first:id_suffix:{}", hint)));
+                    }
+                }
+            }
+            return Some((btn_target, format!("id_suffix:{}", hint)));
         }
     }
     None
@@ -452,7 +470,7 @@ fn is_on_home(dump: &UiDump, pkg: &str, cfg: &OnboardingConfig, screen: &ScreenI
         return false;
     }
     // 仍有协议关卡特征或引导页特征 → 未到主页
-    if detect_privacy_dialog(dump, cfg, screen).is_some() {
+    if detect_privacy_dialog(dump, cfg, screen, true).is_some() {
         return false;
     }
     if !matches!(detect_guide_page(dump, cfg, screen), GuideAction::NotGuide) {
@@ -468,6 +486,7 @@ fn detect_next_action(
     pkg: &str,
     cfg: &OnboardingConfig,
     screen: &ScreenInfo,
+    cb_already_clicked: bool,
 ) -> Action {
     // 优先级：系统教学弹窗（最顶层遮挡）→ 系统权限弹窗 → 隐私协议 → 主页
     if let Some(n) = detect_system_cling(dump) {
@@ -483,7 +502,7 @@ fn detect_next_action(
         let (x, y) = n.bounds.center();
         return Action::Tap { x, y, stage: Stage::Permission, matched_by: matched };
     }
-    if let Some((n, matched)) = detect_privacy_dialog(dump, cfg, screen) {
+    if let Some((n, matched)) = detect_privacy_dialog(dump, cfg, screen, cb_already_clicked) {
         let (x, y) = n.bounds.center();
         return Action::Tap { x, y, stage: Stage::Privacy, matched_by: matched };
     }
@@ -521,6 +540,7 @@ impl OnboardingRunner {
     pub async fn run(&self) -> Result<OnboardingStats, AdbError> {
         let started = Instant::now();
         let mut stats = OnboardingStats::default();
+        let mut privacy_cb_clicked = false;
         let mut no_target_streak = 0u32;
         let mut last_focus = String::new();
         let mut h5_candidate_idx = 0usize;
@@ -563,7 +583,7 @@ impl OnboardingRunner {
                     continue;
                 }
             };
-            let action = detect_next_action(&dump, &self.pkg, &self.cfg, &self.screen);
+            let action = detect_next_action(&dump, &self.pkg, &self.cfg, &self.screen, privacy_cb_clicked);
 
             // v1.5：每轮 tracing 日志
             tracing::info!(
@@ -581,12 +601,19 @@ impl OnboardingRunner {
                     iac.tap(x, y).await?;
                     match stage {
                         Stage::Privacy => {
-                            stats.privacy_agreed = true;
-                            stats.agree_button_matched_by = Some(matched_by);
-                            // 隐私协议双保险：触控点击后再补发 KEYCODE_ENTER 确认键，等待 600ms 隐去动画并清空 focus 缓存
-                            let _ = self.adb.keyevent(&self.serial, "KEYCODE_ENTER").await;
-                            tokio::time::sleep(Duration::from_millis(600)).await;
-                            last_focus.clear();
+                            if matched_by.starts_with("cb_first:") {
+                                privacy_cb_clicked = true;
+                                tracing::info!(round, %matched_by, "Onboarding: 已点击勾选隐私协议 CheckBox，下轮将直接点击同意按钮");
+                                tokio::time::sleep(Duration::from_millis(400)).await;
+                                last_focus.clear();
+                            } else {
+                                stats.privacy_agreed = true;
+                                stats.agree_button_matched_by = Some(matched_by);
+                                // 隐私协议双保险：触控点击后再补发 KEYCODE_ENTER 确认键，等待 600ms 隐去动画并清空 focus 缓存
+                                let _ = self.adb.keyevent(&self.serial, "KEYCODE_ENTER").await;
+                                tokio::time::sleep(Duration::from_millis(600)).await;
+                                last_focus.clear();
+                            }
                         }
                         Stage::GuideSkip => stats.guide_skip_count += 1,
                         Stage::GuideEnter => {
@@ -835,7 +862,7 @@ mod tests {
         let dump = UiDump::parse(PRIVACY_XML).unwrap();
         let cfg = OnboardingConfig::default();
         let screen = test_screen();
-        let hit = detect_privacy_dialog(&dump, &cfg, &screen);
+        let hit = detect_privacy_dialog(&dump, &cfg, &screen, false);
         assert!(hit.is_some(), "应识别出协议弹窗");
         let (node, matched) = hit.unwrap();
         // 必须选中「同意」而非「不同意」（§11.2 负向过滤）
@@ -851,7 +878,7 @@ mod tests {
             enabled="true" bounds="[0,0][100,50]" class="android.widget.TextView"/></hierarchy>"#;
         let dump = UiDump::parse(xml).unwrap();
         let cfg = OnboardingConfig::default();
-        assert!(detect_privacy_dialog(&dump, &cfg, &test_screen()).is_none());
+        assert!(detect_privacy_dialog(&dump, &cfg, &test_screen(), false).is_none());
     }
 
     #[test]
@@ -921,7 +948,7 @@ mod tests {
         assert_eq!(hit.unwrap().text, "Got it");
         // 且它应该成为 detect_next_action 的第一个命中（最高优先级）
         let cfg = OnboardingConfig::default();
-        match detect_next_action(&dump, "com.xxcb.chenshipin", &cfg, &test_screen()) {
+        match detect_next_action(&dump, "com.xxcb.chenshipin", &cfg, &test_screen(), false) {
             Action::Tap { stage, .. } => assert_eq!(stage, Stage::SystemCling),
             _ => panic!("cling 应以最高优先级被 tap"),
         }
@@ -973,7 +1000,7 @@ mod tests {
         assert!(!is_on_home(&dump, "com.xxcb.chenshipin", &cfg, &screen));
 
         // 3. 新版 APK 跳过引导页，detect_next_action 不再返回 SwipeLeftGuide
-        match detect_next_action(&dump, "com.xxcb.chenshipin", &cfg, &screen) {
+        match detect_next_action(&dump, "com.xxcb.chenshipin", &cfg, &screen, false) {
             Action::None | Action::OnHome => {}
             other => panic!("实际 {:?}", std::mem::discriminant(&other)),
         }
@@ -983,5 +1010,46 @@ mod tests {
 
         // 5. h5_fallback 候选点应非空（max_swipes 后兜底用）
         assert!(!cfg.h5_fallback.candidate_points.is_empty());
+    }
+
+    #[test]
+    fn test_privacy_dialog_checkbox_behavior() {
+        let xml_unchecked = r#"<hierarchy>
+          <node package="com.xxcb.chenshipin" class="android.widget.FrameLayout" clickable="false" enabled="true" bounds="[0,0][1080,2400]">
+            <node text="隐私政策与用户协议" package="com.xxcb.chenshipin" class="android.widget.TextView" clickable="false" enabled="true" bounds="[100,500][980,600]"/>
+            <node text="不同意" package="com.xxcb.chenshipin" class="android.widget.Button" clickable="true" enabled="true" bounds="[100,1200][500,1300]"/>
+            <node text="同意" package="com.xxcb.chenshipin" class="android.widget.Button" clickable="true" enabled="true" bounds="[580,1200][980,1300]"/>
+            <node resource-id="com.xxcb.chenshipin:id/cb_agree" class="android.widget.CheckBox" checkable="true" checked="false" clickable="true" enabled="true" bounds="[100,1100][160,1160]"/>
+          </node>
+        </hierarchy>"#;
+
+        let xml_checked = r#"<hierarchy>
+          <node package="com.xxcb.chenshipin" class="android.widget.FrameLayout" clickable="false" enabled="true" bounds="[0,0][1080,2400]">
+            <node text="隐私政策与用户协议" package="com.xxcb.chenshipin" class="android.widget.TextView" clickable="false" enabled="true" bounds="[100,500][980,600]"/>
+            <node text="不同意" package="com.xxcb.chenshipin" class="android.widget.Button" clickable="true" enabled="true" bounds="[100,1200][500,1300]"/>
+            <node text="同意" package="com.xxcb.chenshipin" class="android.widget.Button" clickable="true" enabled="true" bounds="[580,1200][980,1300]"/>
+            <node resource-id="com.xxcb.chenshipin:id/cb_agree" class="android.widget.CheckBox" checkable="true" checked="true" clickable="true" enabled="true" bounds="[100,1100][160,1160]"/>
+          </node>
+        </hierarchy>"#;
+
+        let dump_unchecked = UiDump::parse(xml_unchecked).unwrap();
+        let dump_checked = UiDump::parse(xml_checked).unwrap();
+        let cfg = OnboardingConfig::default();
+        let screen = test_screen();
+
+        // 1. 未勾选且 cb_already_clicked=false：应当优先点击 CheckBox (cb_first)
+        let hit1 = detect_privacy_dialog(&dump_unchecked, &cfg, &screen, false);
+        assert!(hit1.is_some());
+        assert!(hit1.unwrap().1.starts_with("cb_first:"));
+
+        // 2. 已勾选 (checked=true) 且 cb_already_clicked=false：应当跳过 CheckBox 直接点击同意按钮
+        let hit2 = detect_privacy_dialog(&dump_checked, &cfg, &screen, false);
+        assert!(hit2.is_some());
+        assert!(!hit2.unwrap().1.starts_with("cb_first:"));
+
+        // 3. 即使 XML 中 checked=false，若此前轮次已点击过 (cb_already_clicked=true)：也必须直接点击同意按钮，杜绝反复切换死循环
+        let hit3 = detect_privacy_dialog(&dump_unchecked, &cfg, &screen, true);
+        assert!(hit3.is_some());
+        assert!(!hit3.unwrap().1.starts_with("cb_first:"));
     }
 }

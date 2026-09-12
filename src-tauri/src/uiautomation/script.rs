@@ -12,7 +12,7 @@ fn default_max_rounds() -> u32 {
     20
 }
 fn default_round_interval_ms() -> u64 {
-    1000
+    600
 }
 fn default_stable_gap_ms() -> u64 {
     800
@@ -21,7 +21,7 @@ fn default_max_no_target_streak() -> u32 {
     3
 }
 fn default_flush_dwell_s() -> u32 {
-    8
+    5
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -17,18 +17,11 @@ use std::path::PathBuf;
 /// `ClassNotFoundException: Support.umeng-dau-client.sdk.cmdline-tools.latest`。
 /// `~/Library/Application Support` 带空格，故改用 `~/Library/Caches`（无空格）。
 pub fn default_sdk_root() -> PathBuf {
-    #[cfg(target_os = "windows")]
-    {
-        PathBuf::from(r"C:\umeng-dau-sdk")
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        dirs::cache_dir()
-            .or_else(dirs::home_dir)
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("umeng-dau-client")
-            .join("sdk")
-    }
+    dirs::cache_dir()
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("umeng-dau-client")
+        .join("sdk")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

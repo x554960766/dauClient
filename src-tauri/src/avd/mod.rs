@@ -127,161 +127,183 @@ pub struct DeviceProfileInfo {
     pub density: u32,
 }
 
+pub static DEVICE_PROFILES: &[DeviceProfileInfo] = &[
+    // Xiaomi & Redmi（真实工信部入网型号代码）
+    DeviceProfileInfo {
+        brand: "Xiaomi", model: "24030PN60C", device: "aurora", board: "aurora", hardware: "qcom",
+        fingerprint: "Xiaomi/aurora/aurora:14/UKQ1.230804.001/V816.0.4.0.UNACNXM:user/release-keys",
+        width: 1440, height: 3200, density: 520,
+    },
+    DeviceProfileInfo {
+        brand: "Xiaomi", model: "23116PN5BC", device: "shennong", board: "shennong", hardware: "qcom",
+        fingerprint: "Xiaomi/shennong/shennong:14/UKQ1.230804.001/V816.0.18.0.UNCCNXM:user/release-keys",
+        width: 1200, height: 2670, density: 480,
+    },
+    DeviceProfileInfo {
+        brand: "Xiaomi", model: "23127PN0CC", device: "houji", board: "houji", hardware: "qcom",
+        fingerprint: "Xiaomi/houji/houji:14/UKQ1.230804.001/V816.0.22.0.UNCCNXM:user/release-keys",
+        width: 1200, height: 2670, density: 460,
+    },
+    DeviceProfileInfo {
+        brand: "Xiaomi", model: "2211133C", device: "fuxi", board: "fuxi", hardware: "qcom",
+        fingerprint: "Xiaomi/fuxi/fuxi:14/UKQ1.230804.001/V816.0.4.0.UMCCNXM:user/release-keys",
+        width: 1080, height: 2400, density: 440,
+    },
+    DeviceProfileInfo {
+        brand: "Xiaomi", model: "23117RK66C", device: "manet", board: "manet", hardware: "qcom",
+        fingerprint: "Xiaomi/manet/manet:14/UKQ1.230804.001/V816.0.12.0.UNCCNXM:user/release-keys",
+        width: 1440, height: 3200, density: 520,
+    },
+    DeviceProfileInfo {
+        brand: "Xiaomi", model: "2311DRK48C", device: "vermeer", board: "vermeer", hardware: "qcom",
+        fingerprint: "Xiaomi/vermeer/vermeer:14/UKQ1.230804.001/V816.0.10.0.UNCCNXM:user/release-keys",
+        width: 1440, height: 3200, density: 520,
+    },
+    DeviceProfileInfo {
+        brand: "Xiaomi", model: "22101317C", device: "mondrian", board: "mondrian", hardware: "qcom",
+        fingerprint: "Xiaomi/mondrian/mondrian:13/TKQ1.220905.001/V14.0.23.0.TMNCNXM:user/release-keys",
+        width: 1440, height: 3200, density: 520,
+    },
+    DeviceProfileInfo {
+        brand: "Xiaomi", model: "23090RA98C", device: "zircon", board: "zircon", hardware: "mtk",
+        fingerprint: "Xiaomi/zircon/zircon:13/TP1A.220624.014/V14.0.5.0.TNOCCNXM:user/release-keys",
+        width: 1220, height: 2712, density: 450,
+    },
+    // OPPO & OnePlus
+    DeviceProfileInfo {
+        brand: "OPPO", model: "PHY110", device: "PHY110", board: "PHY110", hardware: "qcom",
+        fingerprint: "OPPO/PHY110/PHY110:14/UP1A.231005.007/14.0.0.501:user/release-keys",
+        width: 1440, height: 3168, density: 510,
+    },
+    DeviceProfileInfo {
+        brand: "OPPO", model: "PHZ110", device: "PHZ110", board: "PHZ110", hardware: "mtk",
+        fingerprint: "OPPO/PHZ110/PHZ110:14/UP1A.231005.007/14.0.0.401:user/release-keys",
+        width: 1264, height: 2780, density: 450,
+    },
+    DeviceProfileInfo {
+        brand: "OPPO", model: "PJJ110", device: "PJJ110", board: "PJJ110", hardware: "qcom",
+        fingerprint: "OPPO/PJJ110/PJJ110:14/UP1A.231005.007/14.0.0.210:user/release-keys",
+        width: 1240, height: 2772, density: 450,
+    },
+    DeviceProfileInfo {
+        brand: "OPPO", model: "PJH110", device: "PJH110", board: "PJH110", hardware: "mtk",
+        fingerprint: "OPPO/PJH110/PJH110:14/UP1A.231005.007/14.0.0.301:user/release-keys",
+        width: 1080, height: 2412, density: 440,
+    },
+    DeviceProfileInfo {
+        brand: "OPPO", model: "PHY120", device: "PHY120", board: "PHY120", hardware: "qcom",
+        fingerprint: "OPPO/PHY120/PHY120:13/TP1A.220905.001/13.1.1.300:user/release-keys",
+        width: 1080, height: 2412, density: 400,
+    },
+    DeviceProfileInfo {
+        brand: "OnePlus", model: "PJD110", device: "PJD110", board: "PJD110", hardware: "qcom",
+        fingerprint: "OnePlus/PJD110/PJD110:14/UKQ1.230917.001/14.0.0.304:user/release-keys",
+        width: 1440, height: 3168, density: 510,
+    },
+    DeviceProfileInfo {
+        brand: "OnePlus", model: "PJD130", device: "PJD130", board: "PJD130", hardware: "qcom",
+        fingerprint: "OnePlus/PJD130/PJD130:14/UKQ1.230917.001/14.0.0.201:user/release-keys",
+        width: 1240, height: 2772, density: 450,
+    },
+    // vivo & iQOO
+    DeviceProfileInfo {
+        brand: "vivo", model: "V2324A", device: "V2324A", board: "V2324A", hardware: "mtk",
+        fingerprint: "vivo/V2324A/V2324A:14/UP1A.231005.007/compiler11181700:user/release-keys",
+        width: 1260, height: 2800, density: 450,
+    },
+    DeviceProfileInfo {
+        brand: "vivo", model: "V2309A", device: "V2309A", board: "V2309A", hardware: "mtk",
+        fingerprint: "vivo/V2309A/V2309A:14/UP1A.231005.007/compiler11151608:user/release-keys",
+        width: 1260, height: 2800, density: 450,
+    },
+    DeviceProfileInfo {
+        brand: "vivo", model: "V2323A", device: "V2323A", board: "V2323A", hardware: "mtk",
+        fingerprint: "vivo/V2323A/V2323A:14/UP1A.231005.007/compiler12011100:user/release-keys",
+        width: 1080, height: 2400, density: 440,
+    },
+    DeviceProfileInfo {
+        brand: "vivo", model: "V2505A", device: "V2505A", board: "V2505A", hardware: "mtk",
+        fingerprint: "vivo/V2505A/V2505A:15/AP3A.240905.015/compiler12101800:user/release-keys",
+        width: 1260, height: 2800, density: 450,
+    },
+    DeviceProfileInfo {
+        brand: "vivo", model: "V2307A", device: "V2307A", board: "V2307A", hardware: "qcom",
+        fingerprint: "vivo/V2307A/V2307A:14/UP1A.231005.007/compiler11201530:user/release-keys",
+        width: 1440, height: 3200, density: 510,
+    },
+    DeviceProfileInfo {
+        brand: "vivo", model: "V2339A", device: "V2339A", board: "V2339A", hardware: "qcom",
+        fingerprint: "vivo/V2339A/V2339A:14/UP1A.231005.007/compiler12150900:user/release-keys",
+        width: 1260, height: 2800, density: 450,
+    },
+    // HUAWEI
+    DeviceProfileInfo {
+        brand: "HUAWEI", model: "ALN-AL00", device: "ALN-AL00", board: "ALN-AL00", hardware: "kirin",
+        fingerprint: "HUAWEI/ALN-AL00/ALN-AL00:12/HUAWEIALN-AL00/4.0.0.138:user/release-keys",
+        width: 1260, height: 2720, density: 440,
+    },
+    DeviceProfileInfo {
+        brand: "HUAWEI", model: "HBM-AL00", device: "HBM-AL00", board: "HBM-AL00", hardware: "kirin",
+        fingerprint: "HUAWEI/HBM-AL00/HBM-AL00:12/HUAWEI4.2.0.115/HBM-AL00:user/release-keys",
+        width: 1260, height: 2844, density: 460,
+    },
+    DeviceProfileInfo {
+        brand: "HUAWEI", model: "MNA-AL00", device: "MNA-AL00", board: "MNA-AL00", hardware: "qcom",
+        fingerprint: "HUAWEI/MNA-AL00/MNA-AL00:12/HUAWEIMNA-AL00/3.1.0.170:user/release-keys",
+        width: 1220, height: 2700, density: 440,
+    },
+    DeviceProfileInfo {
+        brand: "HUAWEI", model: "ADA-AL00U", device: "ADA-AL00U", board: "ADA-AL00U", hardware: "kirin",
+        fingerprint: "HUAWEI/ADA-AL00U/ADA-AL00U:12/HUAWEI4.0.0.120/ADA-AL00U:user/release-keys",
+        width: 1224, height: 2776, density: 440,
+    },
+    DeviceProfileInfo {
+        brand: "HUAWEI", model: "ALT-AL10", device: "ALT-AL10", board: "ALT-AL10", hardware: "kirin",
+        fingerprint: "HUAWEI/ALT-AL10/ALT-AL10:12/HUAWEIALT-AL10/4.0.0.150:user/release-keys",
+        width: 1080, height: 2504, density: 420,
+    },
+    // HONOR
+    DeviceProfileInfo {
+        brand: "HONOR", model: "BTP-AN20", device: "BTP-AN20", board: "BTP-AN20", hardware: "qcom",
+        fingerprint: "HONOR/BTP-AN20/BTP-AN20:14/HONORBTP-AN20/8.0.0.130:user/release-keys",
+        width: 1280, height: 2800, density: 450,
+    },
+    DeviceProfileInfo {
+        brand: "HONOR", model: "BTP-AN10", device: "BTP-AN10", board: "BTP-AN10", hardware: "qcom",
+        fingerprint: "HONOR/BTP-AN10/BTP-AN10:14/HONORBTP-AN10/8.0.0.120:user/release-keys",
+        width: 1280, height: 2800, density: 450,
+    },
+    DeviceProfileInfo {
+        brand: "HONOR", model: "MAA-AN00", device: "MAA-AN00", board: "MAA-AN00", hardware: "qcom",
+        fingerprint: "HONOR/MAA-AN00/MAA-AN00:14/HONORMAA-AN00/8.0.0.110:user/release-keys",
+        width: 1224, height: 2700, density: 440,
+    },
+];
+
+/// 根据机型或设备代号查找匹配的真机 Profile
+pub fn find_profile_by_model(model: &str) -> Option<DeviceProfileInfo> {
+    let clean = model.trim().to_lowercase();
+    if clean.is_empty() {
+        return None;
+    }
+    DEVICE_PROFILES.iter().find(|p| {
+        let p_model = p.model.to_lowercase();
+        let p_dev = p.device.to_lowercase();
+        clean == p_model || clean == p_dev || clean.contains(&p_model) || p_model.contains(&clean)
+    }).cloned()
+}
+
 pub fn random_device_info() -> DeviceProfileInfo {
-    let profiles = [
-        // Xiaomi & Redmi
-        DeviceProfileInfo {
-            brand: "Xiaomi", model: "Xiaomi 14 Ultra", device: "aurora", board: "aurora", hardware: "qcom",
-            fingerprint: "Xiaomi/aurora/aurora:14/UKQ1.230804.001/V816.0.4.0.UNACNXM:user/release-keys",
-            width: 1440, height: 3200, density: 520,
-        },
-        DeviceProfileInfo {
-            brand: "Xiaomi", model: "Xiaomi 14 Pro", device: "shennong", board: "shennong", hardware: "qcom",
-            fingerprint: "Xiaomi/shennong/shennong:14/UKQ1.230804.001/V816.0.18.0.UNCCNXM:user/release-keys",
-            width: 1200, height: 2670, density: 480,
-        },
-        DeviceProfileInfo {
-            brand: "Xiaomi", model: "Xiaomi 14", device: "houji", board: "houji", hardware: "qcom",
-            fingerprint: "Xiaomi/houji/houji:14/UKQ1.230804.001/V816.0.22.0.UNCCNXM:user/release-keys",
-            width: 1200, height: 2670, density: 460,
-        },
-        DeviceProfileInfo {
-            brand: "Xiaomi", model: "Xiaomi 13", device: "fuxi", board: "fuxi", hardware: "qcom",
-            fingerprint: "Xiaomi/fuxi/fuxi:14/UKQ1.230804.001/V816.0.4.0.UMCCNXM:user/release-keys",
-            width: 1080, height: 2400, density: 440,
-        },
-        DeviceProfileInfo {
-            brand: "Xiaomi", model: "Redmi K70 Pro", device: "manet", board: "manet", hardware: "qcom",
-            fingerprint: "Xiaomi/manet/manet:14/UKQ1.230804.001/V816.0.12.0.UNCCNXM:user/release-keys",
-            width: 1440, height: 3200, density: 520,
-        },
-        DeviceProfileInfo {
-            brand: "Xiaomi", model: "Redmi K70", device: "vermeer", board: "vermeer", hardware: "qcom",
-            fingerprint: "Xiaomi/vermeer/vermeer:14/UKQ1.230804.001/V816.0.10.0.UNCCNXM:user/release-keys",
-            width: 1440, height: 3200, density: 520,
-        },
-        DeviceProfileInfo {
-            brand: "Xiaomi", model: "Redmi Note 13 Pro+", device: "zircon", board: "zircon", hardware: "mtk",
-            fingerprint: "Xiaomi/zircon/zircon:13/TP1A.220624.014/V14.0.5.0.TNOCCNXM:user/release-keys",
-            width: 1220, height: 2712, density: 450,
-        },
-        // OPPO & OnePlus
-        DeviceProfileInfo {
-            brand: "OPPO", model: "OPPO Find X7 Ultra", device: "PHY110", board: "PHY110", hardware: "qcom",
-            fingerprint: "OPPO/PHY110/PHY110:14/UP1A.231005.007/14.0.0.501:user/release-keys",
-            width: 1440, height: 3168, density: 510,
-        },
-        DeviceProfileInfo {
-            brand: "OPPO", model: "OPPO Find X7", device: "PHZ110", board: "PHZ110", hardware: "mtk",
-            fingerprint: "OPPO/PHZ110/PHZ110:14/UP1A.231005.007/14.0.0.401:user/release-keys",
-            width: 1264, height: 2780, density: 450,
-        },
-        DeviceProfileInfo {
-            brand: "OPPO", model: "OPPO Reno11 Pro", device: "PJJ110", board: "PJJ110", hardware: "qcom",
-            fingerprint: "OPPO/PJJ110/PJJ110:14/UP1A.231005.007/14.0.0.210:user/release-keys",
-            width: 1240, height: 2772, density: 450,
-        },
-        DeviceProfileInfo {
-            brand: "OPPO", model: "OPPO Reno11", device: "PJH110", board: "PJH110", hardware: "mtk",
-            fingerprint: "OPPO/PJH110/PJH110:14/UP1A.231005.007/14.0.0.301:user/release-keys",
-            width: 1080, height: 2412, density: 440,
-        },
-        DeviceProfileInfo {
-            brand: "OPPO", model: "OPPO K11", device: "PHY120", board: "PHY120", hardware: "qcom",
-            fingerprint: "OPPO/PHY120/PHY120:13/TP1A.220905.001/13.1.1.300:user/release-keys",
-            width: 1080, height: 2412, density: 400,
-        },
-        DeviceProfileInfo {
-            brand: "OnePlus", model: "OnePlus 12", device: "PJD110", board: "PJD110", hardware: "qcom",
-            fingerprint: "OnePlus/PJD110/PJD110:14/UKQ1.230917.001/14.0.0.304:user/release-keys",
-            width: 1440, height: 3168, density: 510,
-        },
-        DeviceProfileInfo {
-            brand: "OnePlus", model: "OnePlus Ace 3", device: "PJD130", board: "PJD130", hardware: "qcom",
-            fingerprint: "OnePlus/PJD130/PJD130:14/UKQ1.230917.001/14.0.0.201:user/release-keys",
-            width: 1240, height: 2772, density: 450,
-        },
-        // vivo & iQOO
-        DeviceProfileInfo {
-            brand: "vivo", model: "vivo X100 Pro", device: "V2324A", board: "V2324A", hardware: "mtk",
-            fingerprint: "vivo/V2324A/V2324A:14/UP1A.231005.007/compiler11181700:user/release-keys",
-            width: 1260, height: 2800, density: 450,
-        },
-        DeviceProfileInfo {
-            brand: "vivo", model: "vivo X100", device: "V2309A", board: "V2309A", hardware: "mtk",
-            fingerprint: "vivo/V2309A/V2309A:14/UP1A.231005.007/compiler11151608:user/release-keys",
-            width: 1260, height: 2800, density: 450,
-        },
-        DeviceProfileInfo {
-            brand: "vivo", model: "vivo S18 Pro", device: "V2323A", board: "V2323A", hardware: "mtk",
-            fingerprint: "vivo/V2323A/V2323A:14/UP1A.231005.007/compiler12011100:user/release-keys",
-            width: 1080, height: 2400, density: 440,
-        },
-        DeviceProfileInfo {
-            brand: "vivo", model: "iQOO 12 Pro", device: "V2307A", board: "V2307A", hardware: "qcom",
-            fingerprint: "vivo/V2307A/V2307A:14/UP1A.231005.007/compiler11201530:user/release-keys",
-            width: 1440, height: 3200, density: 510,
-        },
-        DeviceProfileInfo {
-            brand: "vivo", model: "iQOO Neo9", device: "V2339A", board: "V2339A", hardware: "qcom",
-            fingerprint: "vivo/V2339A/V2339A:14/UP1A.231005.007/compiler12150900:user/release-keys",
-            width: 1260, height: 2800, density: 450,
-        },
-        // HUAWEI
-        DeviceProfileInfo {
-            brand: "HUAWEI", model: "HUAWEI Mate 60 Pro", device: "ALN-AL00", board: "ALN-AL00", hardware: "kirin",
-            fingerprint: "HUAWEI/ALN-AL00/ALN-AL00:12/HUAWEIALN-AL00/4.0.0.138:user/release-keys",
-            width: 1260, height: 2720, density: 440,
-        },
-        DeviceProfileInfo {
-            brand: "HUAWEI", model: "HUAWEI Pura 70 Ultra", device: "HBM-AL00", board: "HBM-AL00", hardware: "kirin",
-            fingerprint: "HUAWEI/HBM-AL00/HBM-AL00:12/HUAWEI4.2.0.115/HBM-AL00:user/release-keys",
-            width: 1260, height: 2844, density: 460,
-        },
-        DeviceProfileInfo {
-            brand: "HUAWEI", model: "HUAWEI P60 Art", device: "MNA-AL00", board: "MNA-AL00", hardware: "qcom",
-            fingerprint: "HUAWEI/MNA-AL00/MNA-AL00:12/HUAWEIMNA-AL00/3.1.0.170:user/release-keys",
-            width: 1220, height: 2700, density: 440,
-        },
-        DeviceProfileInfo {
-            brand: "HUAWEI", model: "HUAWEI nova 12 Pro", device: "ADA-AL00U", board: "ADA-AL00U", hardware: "kirin",
-            fingerprint: "HUAWEI/ADA-AL00U/ADA-AL00U:12/HUAWEI4.0.0.120/ADA-AL00U:user/release-keys",
-            width: 1224, height: 2776, density: 440,
-        },
-        DeviceProfileInfo {
-            brand: "HUAWEI", model: "HUAWEI Mate X5", device: "ALT-AL10", board: "ALT-AL10", hardware: "kirin",
-            fingerprint: "HUAWEI/ALT-AL10/ALT-AL10:12/HUAWEIALT-AL10/4.0.0.150:user/release-keys",
-            width: 1080, height: 2504, density: 420,
-        },
-        // HONOR
-        DeviceProfileInfo {
-            brand: "HONOR", model: "Honor Magic6 Pro", device: "BTP-AN20", board: "BTP-AN20", hardware: "qcom",
-            fingerprint: "HONOR/BTP-AN20/BTP-AN20:14/HONORBTP-AN20/8.0.0.130:user/release-keys",
-            width: 1280, height: 2800, density: 450,
-        },
-        DeviceProfileInfo {
-            brand: "HONOR", model: "Honor Magic6", device: "BTP-AN10", board: "BTP-AN10", hardware: "qcom",
-            fingerprint: "HONOR/BTP-AN10/BTP-AN10:14/HONORBTP-AN10/8.0.0.120:user/release-keys",
-            width: 1280, height: 2800, density: 450,
-        },
-        DeviceProfileInfo {
-            brand: "HONOR", model: "Honor 100 Pro", device: "MAA-AN00", board: "MAA-AN00", hardware: "qcom",
-            fingerprint: "HONOR/MAA-AN00/MAA-AN00:14/HONORMAA-AN00/8.0.0.110:user/release-keys",
-            width: 1224, height: 2700, density: 440,
-        },
-    ];
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let idx = (nanos as usize) % profiles.len();
-    profiles[idx].clone()
+    let idx = (nanos as usize) % DEVICE_PROFILES.len();
+    DEVICE_PROFILES[idx].clone()
 }
 
-/// 随机常见 Android 设备品牌与型号属性（包含完整的真机 Fingerprint、Hardware、Board、Flavor，防 SDK 识别模拟器）
-pub fn random_device_props() -> Vec<(String, String)> {
-    let info = random_device_info();
-
+/// 根据指定 Profile 构建真机属性键值对（包含完整的真机 Fingerprint、Hardware、Board、Flavor，防 SDK 识别模拟器）
+pub fn device_props_from_info(info: &DeviceProfileInfo) -> Vec<(String, String)> {
     let partitions = ["", ".system", ".vendor", ".product", ".odm", ".system_ext", ".bootimage"];
     let mut props = Vec::new();
 
@@ -306,11 +328,79 @@ pub fn random_device_props() -> Vec<(String, String)> {
     props.push(("ro.system_ext.build.fingerprint".to_string(), info.fingerprint.to_string()));
     props.push(("ro.bootimage.build.fingerprint".to_string(), info.fingerprint.to_string()));
 
+    // 针对不同国产厂商补充对应 ROM 属性，消除「机型是小米系统却是 AOSP」的风控破绽
+    props.extend(vendor_os_props(&info.brand, &info.device));
+
     props
 }
 
-/// 将随机派生的真机品牌/型号以及物理分辨率/DPI 注入 AVD 的 config.ini（Android 原生 system.property.* 及 hw.lcd 覆盖机制）
-pub async fn inject_system_properties_to_config_ini(avd_name: &str) {
+/// 针对国产主流厂商生成特定 ROM 系统版本属性（MIUI / OriginOS / ColorOS / HarmonyOS）
+pub fn vendor_os_props(brand: &str, device: &str) -> Vec<(String, String)> {
+    let lower = brand.trim().to_lowercase();
+    let mut props = vec![
+        ("ro.kernel.qemu".to_string(), "0".to_string()),
+        ("ro.boot.qemu".to_string(), "0".to_string()),
+        ("ro.hardware.virtual".to_string(), "0".to_string()),
+    ];
+    if lower == "xiaomi" || lower == "redmi" {
+        props.push(("ro.miui.ui.version.name".to_string(), "V14".to_string()));
+        props.push(("ro.miui.ui.version.code".to_string(), "14".to_string()));
+        props.push(("ro.miui.version.code_time".to_string(), "1700000000".to_string()));
+        props.push(("ro.build.display.id".to_string(), format!("{}-user 14 HyperOS-1.0.8.0 release-keys", device)));
+    } else if lower == "vivo" || lower == "iqoo" {
+        props.push(("ro.vivo.os.name".to_string(), "OriginOS".to_string()));
+        props.push(("ro.vivo.os.version".to_string(), "4.0".to_string()));
+        props.push(("ro.vivo.os.build.version".to_string(), "4.0".to_string()));
+        props.push(("ro.vivo.product.version".to_string(), "4.0".to_string()));
+        props.push(("ro.build.display.id".to_string(), format!("OriginOS 4.0.1.{}", device)));
+    } else if lower == "oppo" || lower == "oneplus" || lower == "realme" {
+        props.push(("ro.build.version.opporom".to_string(), "ColorOS 14.0".to_string()));
+        props.push(("ro.rom.different.version".to_string(), "ColorOS 14.0".to_string()));
+        props.push(("ro.build.display.id".to_string(), format!("{}_14.0.0.300(CN01)", device)));
+    } else if lower == "huawei" {
+        props.push(("ro.build.version.emui".to_string(), "HarmonyOS 4.0.0".to_string()));
+        props.push(("ro.build.hw_emui_api_level".to_string(), "29".to_string()));
+        props.push(("ro.build.display.id".to_string(), format!("HarmonyOS 4.0.0.138({})", device)));
+    } else if lower == "honor" {
+        props.push(("ro.build.version.magic".to_string(), "MagicOS 8.0".to_string()));
+        props.push(("ro.honor.build.version.incremental".to_string(), "8.0.0.130".to_string()));
+        props.push(("ro.build.display.id".to_string(), format!("MagicOS 8.0.0.130({})", device)));
+    } else {
+        props.push(("ro.build.display.id".to_string(), format!("{}-user 14 release-keys", device)));
+    }
+    props
+}
+
+/// 随机常见 Android 设备品牌与型号属性
+pub fn random_device_props() -> Vec<(String, String)> {
+    let info = random_device_info();
+    device_props_from_info(&info)
+}
+
+/// 按 AVD 名「确定性」选择真机档案：同一 AVD 永远返回同一机型。
+///
+/// 这是 L3 批量提速的关键。`apply_device_spoofing` 会把机型指纹写入 system 分区的
+/// build.prop（`-wipe-data` 只清 userdata，改动持久）。若机型固定，同一 AVD 首次 L3
+/// 完整伪装（含 build.prop 重启）之后，后续 L3  wipe 重启时 `getprop` 读到的仍是该机型，
+/// 命中 apply_device_spoofing 开头的「型号已匹配」早退分支，从而跳过 root/remount/重启，
+/// 实现「同一 AVD 只有第一次 L3 双启动，后续 L3 单启动」。
+/// 不同 AVD（不同 slot）仍映射到不同机型，跨设备多样性不受影响。
+pub fn device_info_for_avd(avd_name: &str) -> DeviceProfileInfo {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    avd_name.hash(&mut h);
+    let idx = (h.finish() as usize) % DEVICE_PROFILES.len();
+    DEVICE_PROFILES[idx].clone()
+}
+
+/// 与 `device_info_for_avd` 配套的确定性 props（供 BootOpts.props / config.ini 注入）
+pub fn device_props_for_avd(avd_name: &str) -> Vec<(String, String)> {
+    device_props_from_info(&device_info_for_avd(avd_name))
+}
+
+/// 将真机品牌/型号以及物理分辨率/DPI 注入 AVD 的 config.ini（Android 原生 system.property.* 及 hw.lcd 覆盖机制）
+pub async fn inject_system_properties_to_config_ini_with_profile(avd_name: &str, custom_info: Option<&DeviceProfileInfo>) {
     let avd_dir = if let Ok(custom) = std::env::var("ANDROID_AVD_HOME") {
         PathBuf::from(custom).join(format!("{}.avd", avd_name))
     } else if let Some(home) = dirs::home_dir() {
@@ -324,7 +414,14 @@ pub async fn inject_system_properties_to_config_ini(avd_name: &str) {
         return;
     }
 
-    let info = random_device_info();
+    let default_info;
+    let info = match custom_info {
+        Some(i) => i,
+        None => {
+            default_info = random_device_info();
+            &default_info
+        }
+    };
 
     let partitions = ["", ".system", ".vendor", ".product", ".odm", ".system_ext", ".bootimage"];
     let mut props = Vec::new();
@@ -350,11 +447,22 @@ pub async fn inject_system_properties_to_config_ini(avd_name: &str) {
     props.push(("ro.system_ext.build.fingerprint".to_string(), info.fingerprint.to_string()));
     props.push(("ro.bootimage.build.fingerprint".to_string(), info.fingerprint.to_string()));
 
+    // 注入对应国产厂商特有 ROM 系统属性
+    props.extend(vendor_os_props(&info.brand, &info.device));
+
     let mut extra = String::new();
     extra.push_str("\n# Custom System Properties & Display Hardware\n");
     extra.push_str(&format!("hw.lcd.width={}\n", info.width));
     extra.push_str(&format!("hw.lcd.height={}\n", info.height));
     extra.push_str(&format!("hw.lcd.density={}\n", info.density));
+    // 多开并发轻量化硬件配置（跨平台生效，降低系统级内存与虚拟设备开销）
+    extra.push_str("hw.ramSize=1280\n");
+    extra.push_str("vm.heapSize=256\n");
+    extra.push_str("hw.cpu.ncore=2\n");
+    extra.push_str("hw.camera.back=none\n");
+    extra.push_str("hw.camera.front=none\n");
+    extra.push_str("hw.audioInput=no\n");
+    extra.push_str("hw.audioOutput=no\n");
 
     for (k, v) in props {
         extra.push_str(&format!("system.property.{}={}\n", k, v));
@@ -369,6 +477,11 @@ pub async fn inject_system_properties_to_config_ini(avd_name: &str) {
                     && !t.starts_with("hw.lcd.width")
                     && !t.starts_with("hw.lcd.height")
                     && !t.starts_with("hw.lcd.density")
+                    && !t.starts_with("hw.ramSize")
+                    && !t.starts_with("vm.heapSize")
+                    && !t.starts_with("hw.cpu.ncore")
+                    && !t.starts_with("hw.camera.")
+                    && !t.starts_with("hw.audio")
             })
             .collect();
         let mut new_content = cleaned.join("\n");
@@ -383,6 +496,10 @@ pub async fn inject_system_properties_to_config_ini(avd_name: &str) {
             "L3/AVD 屏幕分辨率与真机属性已注入 config.ini"
         );
     }
+}
+
+pub async fn inject_system_properties_to_config_ini(avd_name: &str) {
+    inject_system_properties_to_config_ini_with_profile(avd_name, None).await;
 }
 
 /// 强行清理指定 AVD 的残留文件锁（防 QEMU 报 FATAL: Another emulator instance is running）
@@ -449,10 +566,16 @@ pub async fn kill_emulator_on_port(port: u16) {
     }
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
         for p in [port, port + 1] {
-            let _ = std::process::Command::new("cmd")
-                .args(["/C", &format!("for /f \"tokens=5\" %a in ('netstat -aon ^| findstr :{}') do taskkill /F /PID %a", p)])
-                .output();
+            let mut cmd = std::process::Command::new("powershell");
+            cmd.args([
+                "-NoProfile",
+                "-Command",
+                &format!("Get-NetTCPConnection -LocalPort {} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess | ForEach-Object {{ Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }}", p),
+            ]);
+            cmd.creation_flags(0x08000000);
+            let _ = cmd.output();
         }
     }
 }
@@ -478,6 +601,11 @@ impl Emulator {
     /// 关键（v1.1 P1-5）：current_dir 必须是 emulator 目录，
     /// 二进制靠自身所在目录定位 lib64/、qemu/ 等资源。
     pub async fn boot(&self, avd: &str, port: u16, opts: &BootOpts) -> Result<Child, AvdError> {
+        if !wait_port_free(port, 2).await {
+            tracing::warn!("[AVD] 端口 {} 未被释放，尝试清理残留 QEMU 进程...", port);
+            kill_emulator_on_port(port).await;
+            let _ = wait_port_free(port, 3).await;
+        }
         clean_avd_lock_files(avd);
 
         let mut cmd = Command::new(&self.bin);
@@ -502,6 +630,11 @@ impl Emulator {
             "-no-boot-anim",
             "-no-metrics",
             "-writable-system",
+            "-camera-back", "none",
+            "-camera-front", "none",
+            "-no-passive-gps",
+            "-dns-server", "114.114.114.114,8.8.8.8",
+            "-timezone", "Asia/Shanghai",
             "-gpu", gpu_mode,
             "-memory", &opts.mem_mb.unwrap_or(1280).to_string(),
         ]);

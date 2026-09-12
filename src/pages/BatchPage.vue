@@ -27,15 +27,20 @@
             </n-tag>
           </n-space>
         </n-form-item>
-        <n-grid :cols="3" :x-gap="16">
+        <n-grid :cols="4" :x-gap="16">
           <n-gi>
             <n-form-item label="目标数量">
               <n-input-number v-model:value="app.config.count" :min="1" :max="1000" />
             </n-form-item>
           </n-gi>
           <n-gi>
-            <n-form-item label="并发（内存推荐）">
+            <n-form-item label="并发（多线程执行）">
               <n-input-number v-model:value="app.config.concurrency" :min="1" :max="8" />
+              <template #feedback>
+                <span style="font-size: 11px; color: #888">
+                  推荐: {{ app.preflightReport?.recommended_concurrency || 4 }} 台并发（根据主机资源测算）
+                </span>
+              </template>
             </n-form-item>
           </n-gi>
           <n-gi>
@@ -43,22 +48,83 @@
               <n-select v-model:value="app.config.reset_level" :options="levelOptions" />
             </n-form-item>
           </n-gi>
+          <n-gi>
+            <n-form-item label="分配/测试模式">
+              <n-select v-model:value="allocationMode" :options="modeOptions" @update:value="onModeChange" />
+            </n-form-item>
+          </n-gi>
         </n-grid>
+
+        <n-form-item label="手机换 IP">
+          <n-space vertical style="width: 100%">
+            <n-space align="center">
+              <n-switch v-model:value="app.config.auto_rotate_ip" @update:value="onRotateIpToggle" />
+              <n-text style="font-weight: 500">每批并发设备完成后，通过手机 USB 飞行模式更换 IP</n-text>
+              <n-button size="tiny" secondary :loading="refreshingPhones" @click="refreshPhones">
+                刷新手机
+              </n-button>
+              <n-button size="tiny" type="info" secondary :loading="testingIp" @click="manualTestRotateIp">
+                测试单次换 IP
+              </n-button>
+            </n-space>
+
+            <div v-if="app.config.auto_rotate_ip" style="background: rgba(0,0,0,0.02); padding: 8px 12px; border-radius: 6px; border: 1px dashed #d9d9d9">
+              <n-space align="center" style="margin-bottom: 4px">
+                <span style="font-size: 13px">已识别真机：</span>
+                <n-tag v-if="detectedPhones.length > 0" type="success" size="small">
+                  {{ detectedPhones.map(p => `${p.model} (${p.serial})`).join('、') }}
+                </n-tag>
+                <n-tag v-else type="warning" size="small">
+                  未检测到 USB 连接的安卓真机（请检查 USB 连线、调试权限与网络共享）
+                </n-tag>
+              </n-space>
+              <n-space align="center">
+                <n-text depth="3" style="font-size: 12px">
+                  断网保持: {{ app.config.rotate_ip_disconnect_wait_s || 4 }}s ｜ 恢复等待: {{ app.config.rotate_ip_reconnect_wait_s || 6 }}s ｜ 自动守护 USB 网络共享 (RNDIS)
+                </n-text>
+              </n-space>
+            </div>
+          </n-space>
+        </n-form-item>
+
         <n-form-item label="耗时预估">
           <n-text>{{ estText }}</n-text>
         </n-form-item>
       </n-form>
 
+      <n-alert v-if="stackStatus && stackStatus.available_today > 0" type="success" style="margin-bottom: 12px">
+        已就绪：档案堆栈中已有 {{ stackStatus.available_today }} 台可用档案，可以直接测试【留存设备】！
+      </n-alert>
+      <n-alert v-else-if="stackStatus && stackStatus.total_entries === 0" type="info" style="margin-bottom: 12px">
+        提示：堆栈当前为空（首次运行），本次将运行 L3 新增设备并自动保存为档案，跑完即可测试【留存】！
+      </n-alert>
+      <n-alert v-else-if="stackStatus && stackStatus.available_today === 0" type="warning" style="margin-bottom: 12px">
+        提示：今天的 {{ stackStatus.used_today }} 份档案已全部用完，继续运行将自动走 L3 新增。若需重新测试留存，请点击下方的「手动重置设备使用状态」。
+      </n-alert>
+
       <n-alert v-if="crossesMidnight" type="warning">
         预计跨零点完成，DAU 按北京时间自然日切分，建议改期或分批。
       </n-alert>
 
-      <div style="margin-top: 12px; display: flex; gap: 12px">
+      <div style="margin-top: 12px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap">
         <n-button type="primary" size="large" :disabled="!canStart" @click="start">
           开始放量
         </n-button>
         <n-button v-if="batch.running" type="error" size="large" @click="stop">停止（将清理设备）</n-button>
+        <n-button type="warning" size="large" @click="resetUsage">手动重置设备使用状态</n-button>
       </div>
+
+      <div v-if="stackStatus" style="margin-top: 12px">
+        <n-space align="center">
+          <n-tag type="info">档案堆栈容量: {{ stackStatus.total_entries }} / {{ stackStatus.capacity }}</n-tag>
+          <n-tag type="success">今天可用: {{ stackStatus.available_today }} 台</n-tag>
+          <n-tag type="warning">今天已用: {{ stackStatus.used_today }} 台</n-tag>
+          <n-text v-if="stackStatus.last_cleared_date" depth="3" style="font-size: 12px">
+            （上次重置日期: {{ stackStatus.last_cleared_date }}）
+          </n-text>
+        </n-space>
+      </div>
+
       <n-text v-if="!app.gate1Passed" type="warning" style="display: block; margin-top: 8px; font-size: 12px">
         提示：GATE 1 未通过也可以试跑，但建议先完成试点验证
       </n-text>
@@ -77,17 +143,41 @@
         </n-button>
       </n-space>
 
-      <n-grid :cols="8" :x-gap="8" :y-gap="8" style="margin-top: 16px">
+      <!-- 手机换 IP 动态状态条 -->
+      <div v-if="app.config.auto_rotate_ip || batch.currentIp || batch.rotatingIp" style="margin-top: 12px; padding: 8px 12px; background: #fafafa; border-radius: 6px; border: 1px solid #eee">
+        <n-space align="center">
+          <n-tag v-if="batch.rotatingIp" type="warning" size="small">
+            ✈️ 正在切换手机飞行模式重拨换 IP 中...
+          </n-tag>
+          <n-tag v-if="batch.currentIp" type="info" size="small">
+            🌐 出口 IP: {{ batch.currentIp }}
+          </n-tag>
+          <n-text v-if="batch.rotateMessage" depth="3" style="font-size: 12px">
+            {{ batch.rotateMessage }}
+          </n-text>
+        </n-space>
+      </div>
+
+      <n-grid :cols="6" :x-gap="8" :y-gap="8" style="margin-top: 16px">
         <n-gi v-for="[idx, d] in [...batch.devices].sort((a, b) => a[0] - b[0])" :key="idx">
           <n-tooltip>
             <template #trigger>
-              <div class="dev-cell" :class="d.status">#{{ idx }}</div>
+              <div class="dev-cell" :class="[d.status, d.is_retention ? 'retention' : 'new-device']">
+                #{{ idx }} {{ d.is_retention ? '(留存)' : (d.reset_level && d.reset_level.includes('L2.5') ? '(多用户)' : '(新增)') }}
+              </div>
             </template>
-            <div style="max-width: 300px; font-size: 12px">
-              <div>状态：{{ d.status }}　耗时：{{ d.duration_s.toFixed(1) }}s</div>
-              <div>ANDROID_ID：{{ d.android_id || "—" }}</div>
-              <div>UMID：{{ d.umid || "—" }}</div>
-              <div v-if="d.error" style="color: #ff8888">{{ d.error }}</div>
+            <div style="max-width: 320px; font-size: 12px; line-height: 1.6">
+              <div>
+                <b>运行模式：</b>
+                <n-tag :type="d.is_retention ? 'success' : (d.reset_level && d.reset_level.includes('L2.5') ? 'info' : 'warning')" size="small">
+                  {{ d.is_retention ? "留存设备（档案还原）" : (d.reset_level && d.reset_level.includes('L2.5') ? "L2.5 多用户" : "L3 恢复出厂新增") }}
+                </n-tag>
+              </div>
+              <div v-if="d.device_model"><b>设备型号：</b>{{ d.device_model }}</div>
+              <div><b>运行状态：</b>{{ d.status }}　<b>耗时：</b>{{ d.duration_s.toFixed(1) }}s</div>
+              <div><b>ANDROID_ID：</b>{{ d.android_id || "—" }}</div>
+              <div v-if="d.umid && d.umid !== '—' && d.umid !== ''"><b>UMID：</b>{{ d.umid }}</div>
+              <div v-if="d.error" style="color: #ff8888; margin-top: 4px"><b>错误：</b>{{ d.error }}</div>
             </div>
           </n-tooltip>
         </n-gi>
@@ -100,20 +190,25 @@
 import { computed, onMounted, ref } from "vue";
 import {
   NAlert, NButton, NCard, NForm, NFormItem, NGi, NGrid, NH2,
-  NInput, NInputNumber, NProgress, NSelect, NSpace, NStatistic, NText, NTooltip, useMessage,
+  NInput, NInputNumber, NProgress, NSelect, NSpace, NStatistic, NSwitch, NTag, NText, NTooltip, useMessage,
 } from "naive-ui";
 import { api } from "../api/ipc";
-import { onBatchDevice, onBatchProgress } from "../api/events";
+import { onBatchDevice, onBatchIpStatus, onBatchProgress } from "../api/events";
 import { useAppStore } from "../stores/app";
 import { useBatchStore } from "../stores/batch";
 import ApkDropZone from "../components/ApkDropZone.vue";
-import type { ApkInfo } from "../api/types";
+import type { ApkInfo, StackStatusReport, UsbPhoneInfo } from "../api/types";
 
 const app = useAppStore();
 const batch = useBatchStore();
 const message = useMessage();
 const declaredAppkey = ref("");
 const apkInfo = ref<ApkInfo | null>(null);
+const stackStatus = ref<StackStatusReport | null>(null);
+
+const detectedPhones = ref<UsbPhoneInfo[]>([]);
+const refreshingPhones = ref(false);
+const testingIp = ref(false);
 
 const levelOptions = [
   { label: "L1 · pm clear（~3s/台）", value: "L1" },
@@ -121,6 +216,23 @@ const levelOptions = [
   { label: "L2.5 · 多用户（~15s/台）", value: "L25" },
   { label: "L3 · 恢复出厂（~100s/台，已验证）", value: "L3" },
 ];
+
+const allocationMode = ref("auto");
+const modeOptions = [
+  { label: "自动概率轮换 (推荐)", value: "auto" },
+  { label: "强制留存测试 (100% 抽取档案)", value: "force_retention" },
+  { label: "强制全新增测试 (100% L3 生成)", value: "force_new" },
+];
+
+function onModeChange(val: string) {
+  if (val === "force_retention") {
+    app.config.l3_probability = 0.0;
+  } else if (val === "force_new") {
+    app.config.l3_probability = 1.0;
+  } else {
+    app.config.l3_probability = 0.40;
+  }
+}
 
 const perDevice = computed(() => {
   const base = { L1: 3, L2: 15, L25: 15, L3: 100 }[app.config.reset_level];
@@ -144,11 +256,30 @@ const canStart = computed(
     !(apkInfo.value?.blacklist_hit)
 );
 
+async function fetchStackStatus() {
+  try {
+    stackStatus.value = await api.getStackStatus();
+  } catch (e) {
+    // 忽略加载错误
+  }
+}
+
+async function resetUsage() {
+  try {
+    await api.resetProfileUsage();
+    message.success("已手动重置今天的所有档案使用状态（解除单日限制）");
+    await fetchStackStatus();
+  } catch (e: any) {
+    message.error("重置失败：" + e);
+  }
+}
+
 async function inspectApk() {
   if (!app.config.apk_path) return;
   try {
     apkInfo.value = await api.inspectApk(app.config.apk_path, declaredAppkey.value);
     if (apkInfo.value.pkg && !app.config.pkg) app.config.pkg = apkInfo.value.pkg;
+    if (apkInfo.value.app_label) app.config.app_label = apkInfo.value.app_label;
   } catch (e: any) {
     message.warning("APK 解析失败（aapt 可能未安装）: " + e);
   }
@@ -173,15 +304,64 @@ async function stop() {
   batch.running = false;
 }
 
+async function refreshPhones() {
+  refreshingPhones.value = true;
+  try {
+    detectedPhones.value = await api.detectUsbPhones();
+  } catch (e: any) {
+    message.error("检测手机失败: " + e);
+  } finally {
+    refreshingPhones.value = false;
+  }
+}
+
+async function onRotateIpToggle(enabled: boolean) {
+  if (enabled && detectedPhones.value.length === 0) {
+    await refreshPhones();
+  }
+}
+
+async function manualTestRotateIp() {
+  testingIp.value = true;
+  try {
+    const res = await api.testRotateIp({
+      serial: app.config.rotate_ip_serial || undefined,
+      disconnect_wait_s: app.config.rotate_ip_disconnect_wait_s,
+      reconnect_wait_s: app.config.rotate_ip_reconnect_wait_s,
+    });
+    if (res.success) {
+      message.success(res.message);
+      batch.currentIp = res.new_ip;
+    } else {
+      message.warning(res.message);
+    }
+  } catch (e: any) {
+    message.error("测试换 IP 失败: " + e);
+  } finally {
+    testingIp.value = false;
+  }
+}
+
 onMounted(async () => {
-  await onBatchDevice((d) => batch.onDevice(d));
-  await onBatchProgress((p) => batch.onProgress(p));
+  await fetchStackStatus();
+  await onBatchDevice((d) => {
+    batch.onDevice(d);
+    fetchStackStatus();
+  });
+  await onBatchProgress((p) => {
+    batch.onProgress(p);
+    fetchStackStatus();
+  });
+  await onBatchIpStatus((s) => {
+    batch.onIpStatus(s);
+  });
+  refreshPhones();
 });
 </script>
 
 <style scoped>
 .dev-cell {
-  height: 34px;
+  height: 38px;
   border-radius: 6px;
   display: flex;
   align-items: center;
@@ -189,7 +369,9 @@ onMounted(async () => {
   font-size: 12px;
   background: #e8e8e8;
   color: #666;
+  font-weight: 500;
 }
-.dev-cell.ok { background: #d3f0dd; color: #18a058; }
-.dev-cell.fail { background: #fbe0e3; color: #d03050; }
+.dev-cell.ok.retention { background: #d3f0dd; color: #18a058; border: 1px solid #18a058; }
+.dev-cell.ok.new-device { background: #e3f2fd; color: #2080f0; border: 1px solid #2080f0; }
+.dev-cell.fail { background: #fbe0e3; color: #d03050; border: 1px solid #d03050; }
 </style>

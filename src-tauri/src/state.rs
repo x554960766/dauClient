@@ -24,6 +24,12 @@ pub struct AppState {
     pub settings_file: PathBuf,
     /// 运行输出根目录（runs/dau-run-<ts>/）
     pub runs_dir: PathBuf,
+    /// 设备池持久化文件（留存方案）
+    pub pool_file: PathBuf,
+    /// 身份档案库存储目录（300+ 留存方案）
+    pub profiles_dir: PathBuf,
+    /// 档案堆栈持久化文件（动态堆栈与概率轮换系统）
+    pub stack_file: PathBuf,
 }
 
 impl AppState {
@@ -37,9 +43,12 @@ impl AppState {
             .parent()
             .unwrap_or(&base)
             .join("settings.json");
-        // 确保 runs_dir 存在——否则预检的 disk_free_gb() 在不存在的路径上 statvfs 失败
-        // 会返回 0，误判为「磁盘不足」红 X
+        let pool_file = crate::engine::pool::default_pool_file(&base);
+        let profiles_dir = crate::engine::profile_archive::ProfileArchiveManager::default_profiles_dir(&base);
+        let stack_file = crate::engine::profile_stack::default_stack_file(&base);
+        // 确保 runs_dir 与 profiles_dir 存在
         let _ = std::fs::create_dir_all(&runs_dir);
+        let _ = std::fs::create_dir_all(&profiles_dir);
         Self {
             sdk_dir: base,
             adb_server_port: crate::adb::find_free_adb_port(),
@@ -49,6 +58,9 @@ impl AppState {
             proxy_shutdown: Mutex::new(None),
             settings_file,
             runs_dir,
+            pool_file,
+            profiles_dir,
+            stack_file,
         }
     }
 }

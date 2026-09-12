@@ -8,6 +8,7 @@ import type {
   PreflightReport,
   ReconcileReport,
   SetupReport,
+  StackStatusReport,
 } from "./types";
 
 export const api = {
@@ -37,6 +38,13 @@ export const api = {
   reconcileTPlus1: (runId: string, backendList: string) =>
     invoke<ReconcileReport>("reconcile_t_plus_1", { runId, backendList }),
   listRuns: () => invoke<string[]>("list_runs"),
+
+  getStackStatus: () => invoke<StackStatusReport>("get_stack_status"),
+  resetProfileUsage: () => invoke<void>("reset_profile_usage"),
+
+  detectUsbPhones: () => invoke<import("./types").UsbPhoneInfo[]>("detect_usb_phones"),
+  testRotateIp: (params?: { serial?: string; disconnect_wait_s?: number; reconnect_wait_s?: number }) =>
+    invoke<import("./types").RotateIpResult>("test_rotate_ip", params || {}),
 };
 
 export function defaultConfig(): EngineConfig {
@@ -44,15 +52,23 @@ export function defaultConfig(): EngineConfig {
     apk_path: "",
     pkg: "",
     count: 50,
-    concurrency: 2,
+    concurrency: 4,
     reset_level: "L3",
     system_image: "",
     device_profile: "pixel_6",
-    dwell_s: 10,
-    flush_dwell_s: 8,
+    dwell_s: 5,
+    flush_dwell_s: 5,
     boot_timeout_s: 180,
-    emu_mem_mb: 2048,
+    emu_mem_mb: 1280,
     use_proxy: true,
     max_users: null,
+    stack_capacity: 300,
+    l3_probability: 0.40,
+    full_push_probability: 0.60,
+    enable_stack_mode: true,
+    auto_rotate_ip: false,
+    rotate_ip_serial: null,
+    rotate_ip_disconnect_wait_s: 4,
+    rotate_ip_reconnect_wait_s: 6,
   };
 }

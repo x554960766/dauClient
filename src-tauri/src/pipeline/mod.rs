@@ -34,6 +34,8 @@ pub struct PreflightReport {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApkInfo {
     pub pkg: String,
+    #[serde(default)]
+    pub app_label: String,
     pub appkey: String,
     pub debuggable: bool,
     pub min_sdk: String,
@@ -112,15 +114,28 @@ pub async fn preflight_check(state: &SharedState, cfg: &EngineConfig) -> Preflig
         fix_hint: "检查平台工具是否完整".into(),
     });
 
-    // 5. 磁盘/内存余量 → 推荐并发
+    // 5. 磁盘/内存/CPU 余量 → 智能推荐并发（跨平台：macOS + Windows）
     let mem_gb = physical_memory_gb();
-    let recommended = if mem_gb >= 64 { 6 } else if mem_gb >= 32 { 4 } else { 2 }.min(8);
+    let cores = cpu_cores();
+    let recommended = if mem_gb >= 64 && cores >= 16 {
+        8
+    } else if mem_gb >= 32 && cores >= 10 {
+        6
+    } else if mem_gb >= 16 && cores >= 6 {
+        4
+    } else if mem_gb >= 12 && cores >= 4 {
+        3
+    } else if mem_gb >= 8 {
+        2
+    } else {
+        1
+    }.min(8);
     let disk_ok = disk_free_gb(&state.runs_dir) >= 10;
     items.push(PreflightItem {
         id: "resources".into(),
         label: "资源余量".into(),
         ok: disk_ok,
-        detail: format!("内存 {}GB，推荐并发 {}", mem_gb, recommended),
+        detail: format!("内存 {}GB, CPU {}核，推荐并发 {}", mem_gb, cores, recommended),
         fix_hint: "可用磁盘 < 10GB 时清理空间".into(),
     });
 
@@ -149,6 +164,12 @@ pub async fn preflight_check(state: &SharedState, cfg: &EngineConfig) -> Preflig
     PreflightReport { items, recommended_concurrency: recommended, all_green, est_finish, crosses_midnight: crosses }
 }
 
+fn cpu_cores() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+}
+
 fn physical_memory_gb() -> u64 {
     #[cfg(target_os = "macos")]
     {
@@ -163,7 +184,8 @@ fn physical_memory_gb() -> u64 {
     }
     #[cfg(target_os = "windows")]
     {
-        // GlobalMemoryStatusEx 简化：用 wmic
+        use std::os::windows::process::CommandExt;
+        // 优先使用 wmic，若失败（如 Win11 22H2+ 已默认移除 wmic）则使用 PowerShell 读取 CIM
         if let Ok(out) = std::process::Command::new("wmic")
             .args(["computersystem", "get", "TotalPhysicalMemory", "/value"])
             .output()
@@ -171,7 +193,25 @@ fn physical_memory_gb() -> u64 {
             let s = String::from_utf8_lossy(&out.stdout);
             if let Some(eq) = s.find('=') {
                 if let Ok(bytes) = s[eq + 1..].trim().parse::<u64>() {
-                    return bytes / 1024 / 1024 / 1024;
+                    let gb = bytes / 1024 / 1024 / 1024;
+                    if gb > 0 {
+                        return gb;
+                    }
+                }
+            }
+        }
+        let mut cmd = std::process::Command::new("powershell");
+        cmd.args([
+            "-NoProfile",
+            "-Command",
+            "[math]::Floor((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)",
+        ]);
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        if let Ok(out) = cmd.output() {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if let Ok(gb) = s.parse::<u64>() {
+                if gb > 0 {
+                    return gb;
                 }
             }
         }
@@ -245,7 +285,8 @@ pub async fn inspect_apk(state: &SharedState, apk_path: &str, declared_appkey: &
     // 可选：生产 AppKey 黑名单（settings.json 中维护）
     let blacklist_hit = check_blacklist(&state.settings_file, &appkey).await;
 
-    // v1.2：枚举 APK 声明的权限（§11.1，prepare 阶段 pm grant 用）
+    // 提取 App 显示名称（通过 aapt dump badging 解析资源表，能拿到 @string 引用的明文）
+    let app_label = extract_app_label(&state.sdk_dir, apk_path).await;
     let permissions = match tokio::process::Command::new(&aapt)
         .args(["dump", "permissions", apk_path])
         .output()
@@ -255,7 +296,51 @@ pub async fn inspect_apk(state: &SharedState, apk_path: &str, declared_appkey: &
         Err(_) => Vec::new(),
     };
 
-    Ok(ApkInfo { pkg, appkey, debuggable, min_sdk, appkey_matches_declared: matches, blacklist_hit, permissions })
+    Ok(ApkInfo { pkg, app_label, appkey, debuggable, min_sdk, appkey_matches_declared: matches, blacklist_hit, permissions })
+}
+
+/// 用 `aapt dump badging` 从 APK 解析 App 显示名称（资源表级，能拿到 @string 引用的明文）。
+/// 优先中文本地化 label（设备为中文环境），否则退回通用 application-label / application: label。
+/// 供 inspect_apk 与启动链路的图标精确匹配复用——替代设备端 dumpsys 猜测，避免落入
+/// 「Predicted app:」模糊探测与翻页/抽屉搜索。
+pub async fn extract_app_label(sdk_dir: &std::path::Path, apk_path: &str) -> String {
+    let aapt = sdk_dir.join("build-tools/34.0.0").join(crate::sdkmgr::aapt_bin_name());
+    let out = match tokio::process::Command::new(&aapt)
+        .args(["dump", "badging", apk_path])
+        .output()
+        .await
+    {
+        Ok(o) => o,
+        Err(_) => return String::new(),
+    };
+    let s = String::from_utf8_lossy(&out.stdout);
+    let mut zh_label = String::new();
+    let mut generic_label = String::new();
+    let mut app_attr_label = String::new();
+    for line in s.lines() {
+        let t = line.trim();
+        if t.starts_with("application-label-zh-CN:") || t.starts_with("application-label-zh:") {
+            if let Some(val) = t.split('\'').nth(1) {
+                if !val.is_empty() && zh_label.is_empty() {
+                    zh_label = val.to_string();
+                }
+            }
+        } else if t.starts_with("application-label:") {
+            if let Some(val) = t.split('\'').nth(1) {
+                if !val.is_empty() && generic_label.is_empty() {
+                    generic_label = val.to_string();
+                }
+            }
+        } else if t.starts_with("application:") && t.contains("label='") {
+            if let Some(pos) = t.find("label='") {
+                let rest = &t[pos + 7..];
+                if let Some(end) = rest.find('\'') {
+                    app_attr_label = rest[..end].to_string();
+                }
+            }
+        }
+    }
+    if !zh_label.is_empty() { zh_label } else if !generic_label.is_empty() { generic_label } else { app_attr_label }
 }
 
 fn extract_xml_attr(text: &str, attr: &str) -> Option<String> {
@@ -308,6 +393,10 @@ pub async fn pilot_run(app: AppHandle, state: SharedState, mut cfg: EngineConfig
     cfg.count = 1;
     cfg.concurrency = 1;
     let sdk = state.sdk_dir.clone();
+    // 启动提速：若未传 App 显示名称，从 APK 用 aapt 解析一次供图标精确匹配
+    if cfg.app_label.is_empty() {
+        cfg.app_label = extract_app_label(&sdk, &cfg.apk_path).await;
+    }
     let adb = Adb::new(&sdk, state.adb_server_port);
     let avdm = AvdManager::new(&sdk, adb.env().clone());
     let emulator = Emulator::new(&sdk, adb.env().clone());
@@ -351,7 +440,7 @@ pub async fn pilot_run(app: AppHandle, state: SharedState, mut cfg: EngineConfig
             mem_mb: Some(cfg.emu_mem_mb),
             http_proxy: if cfg.use_proxy { Some(proxy_addr) } else { None },
             max_users: cfg.max_users,
-            props: crate::avd::random_device_props(),
+            props: crate::avd::device_props_for_avd(&avd_name),
         };
         emulator.boot(&avd_name, port, &opts).await.map_err(|e| e.to_string())?;
         tracing::info!("[Pilot] 等待 QEMU 模拟器开机 (sys.boot_completed=1)...");
@@ -393,7 +482,7 @@ pub async fn pilot_run(app: AppHandle, state: SharedState, mut cfg: EngineConfig
             .map_err(|e| e.to_string())?;
 
         emit_state(&app, "pilot://state", serde_json::json!({"state": "Launching"}));
-        adb.launch_app(&serial, &cfg.pkg, None).await.map_err(|e| e.to_string())?;
+        adb.launch_app(&serial, &cfg.pkg, None, &cfg.app_label).await.map_err(|e| e.to_string())?;
         tokio::time::sleep(Duration::from_secs(cfg.dwell_s as u64)).await;
 
         // v1.2：onboarding 多层引导循环（协议 → 引导页 → 功能指引 → 主页）
@@ -436,7 +525,7 @@ pub async fn pilot_run(app: AppHandle, state: SharedState, mut cfg: EngineConfig
             }
         }
 
-        adb.key_home(&serial).await.map_err(|e| e.to_string())?;
+        let _ = adb.key_home(&serial).await;
         tokio::time::sleep(Duration::from_secs(cfg.flush_dwell_s as u64)).await;
 
         logcat.stop().await;
@@ -637,6 +726,58 @@ pub fn gate1_verdict(answers: &Gate1Answers, evidence_ok: bool) -> Gate1Verdict 
 
 // ---------------- Phase 2：放量 ----------------
 
+async fn maybe_rotate_ip(
+    app: &AppHandle,
+    sdk: &std::path::Path,
+    cfg: &EngineConfig,
+    cancel: &CancellationToken,
+) {
+    if !cfg.auto_rotate_ip || cancel.is_cancelled() {
+        return;
+    }
+
+    emit_state(app, "batch://ip_status", serde_json::json!({
+        "rotating": true,
+        "message": "当前批次完成，正在通过手机 USB 飞行模式切换 IP...",
+        "ip": null,
+    }));
+
+    match crate::adb::rotate_ip::rotate_ip_via_adb(
+        sdk,
+        cfg.rotate_ip_serial.as_deref(),
+        cfg.rotate_ip_disconnect_wait_s,
+        cfg.rotate_ip_reconnect_wait_s,
+        Some(cancel),
+    ).await {
+        Ok(res) => {
+            emit_state(app, "batch://ip_status", serde_json::json!({
+                "rotating": false,
+                "message": res.message,
+                "ip": res.new_ip,
+            }));
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "自动换 IP 失败");
+            emit_state(app, "batch://ip_status", serde_json::json!({
+                "rotating": false,
+                "message": format!("换 IP 失败: {}", err),
+                "ip": null,
+            }));
+        }
+    }
+}
+
+/// 等待后台换 IP 动作就绪（冷启动时完全并行，若换 IP 已完成则瞬间放行 0 延迟）
+async fn wait_ip_ready(rx_opt: Option<tokio::sync::watch::Receiver<bool>>) {
+    if let Some(mut rx) = rx_opt {
+        while !*rx.borrow_and_update() {
+            if rx.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+}
+
 pub async fn batch_run(
     app: AppHandle,
     state: SharedState,
@@ -652,6 +793,15 @@ pub async fn batch_run(
     let mut cfg = cfg;
     cfg.runs_dir = run_dir.display().to_string();
 
+    // 启动提速：若前端未传 App 显示名称，从 APK 用 aapt 解析一次，供桌面图标精确匹配
+    //（替代设备端 dumpsys 猜测，避免落入「Predicted app」模糊探测 + 翻页/抽屉搜索）。
+    if cfg.app_label.is_empty() {
+        cfg.app_label = extract_app_label(&state.sdk_dir, &cfg.apk_path).await;
+        if !cfg.app_label.is_empty() {
+            tracing::info!(app_label = %cfg.app_label, "[Batch] 已从 APK 提取 App 显示名称，用于图标精确匹配启动");
+        }
+    }
+
     // 代理（若试点已启动则复用端口，否则新起）
     let proxy = CountingProxy::start().await.map_err(|e| e.to_string())?;
     let proxy_addr: std::net::SocketAddr = format!("127.0.0.1:{}", proxy.port).parse().unwrap();
@@ -661,31 +811,306 @@ pub async fn batch_run(
     let cfg = Arc::new(cfg);
     let started_at = beijing_now();
 
-    let concurrency = cfg.concurrency.min(cfg.count).min(8);
+    if cfg.auto_rotate_ip {
+        let app_clone = app.clone();
+        tokio::spawn(async move {
+            if let Some(ip) = crate::adb::rotate_ip::get_current_public_ip().await {
+                emit_state(&app_clone, "batch://ip_status", serde_json::json!({
+                    "rotating": false,
+                    "message": format!("当前出口公网 IP: {}", ip),
+                    "ip": ip,
+                }));
+            }
+        });
+    }
+
+    let replay_count = cfg.profile_replay_count;
+    let retention_count = cfg.retention_pool_size;
+    let new_count = if retention_count > 0 || replay_count > 0 {
+        cfg.new_device_count
+    } else {
+        cfg.count
+    };
+    let total = replay_count + retention_count + new_count;
+
+    // ---- 动态档案堆栈模式 (Profile Stack Mode) ----
+    if cfg.enable_stack_mode {
+        let mut stack = crate::engine::profile_stack::ProfileStackStore::load(&state.stack_file).await;
+        stack.capacity = cfg.stack_capacity as usize;
+        let _ = stack.check_and_auto_reset();
+        let _ = stack.save(&state.stack_file).await;
+
+        let today = crate::engine::profile_stack::ProfileStackStore::beijing_now_info().0;
+        let total_count = cfg.count;
+        let concurrency = cfg.concurrency.min(total_count).min(8);
+        let mut handles = Vec::new();
+        let mut current_ip_rx: Option<tokio::sync::watch::Receiver<bool>> = None;
+
+        for device_idx in 1..=total_count {
+            if cancel.is_cancelled() {
+                break;
+            }
+            let slot = (device_idx - 1) % concurrency;
+
+            let roll = crate::engine::pseudo_random_f64(device_idx as u64);
+            let force_l3 = roll < cfg.l3_probability;
+
+            let mut selected_profile = None;
+            if !force_l3 {
+                let mut stack_mut = crate::engine::profile_stack::ProfileStackStore::load(&state.stack_file).await;
+                if let Some(prof) = stack_mut.pop_available_for_today(&today, cfg.stack_read_mode) {
+                    let _ = stack_mut.save(&state.stack_file).await;
+                    selected_profile = Some(prof);
+                } else {
+                    tracing::info!(device_idx, reset_level = %cfg.reset_level.as_str(), "堆栈中无可用的未用档案（全用或为空），执行设备重置");
+                }
+            }
+
+            let app_w = app.clone();
+            let cfg_w = cfg.clone();
+            let results = results.clone();
+            let cancel_w = cancel.clone();
+            let sdk_w = sdk.clone();
+            let adb_port = state.adb_server_port;
+            let proxy_addr_s = if cfg.use_proxy { Some(proxy_addr) } else { None };
+            let registry_s = registry.clone();
+            let stack_file_s = state.stack_file.clone();
+            let ip_rx = current_ip_rx.clone();
+
+            if let Some(prof) = selected_profile {
+                handles.push(tokio::spawn(async move {
+                    profile_replay_worker(
+                        app_w, sdk_w, adb_port, slot, device_idx, cfg_w,
+                        results, registry_s, prof, proxy_addr_s, cancel_w,
+                        ip_rx,
+                    ).await;
+                }));
+            } else {
+                handles.push(tokio::spawn(async move {
+                    run_single_l3_and_push_stack(
+                        app_w, sdk_w, adb_port, slot, device_idx, cfg_w,
+                        results, registry_s, proxy_addr_s, stack_file_s, cancel_w,
+                        ip_rx,
+                    ).await;
+                }));
+            }
+
+            tokio::time::sleep(Duration::from_secs(3)).await;
+
+            if handles.len() >= concurrency as usize {
+                // 无论个别设备执行成功还是失败，均安全等待当前批次全部完成
+                for h in handles.drain(..) {
+                    let _ = h.await;
+                }
+                // 当前批次完成！若后续还有设备需要运行，立即在后台异步启动换 IP！
+                // 下一批新设备在下一轮循环中立即启动冷启动，冷启动与手机飞行模式换 IP 完全并行！
+                if device_idx < total_count && !cancel.is_cancelled() && cfg.auto_rotate_ip {
+                    let (tx, rx) = tokio::sync::watch::channel(false);
+                    current_ip_rx = Some(rx);
+                    let app_c = app.clone();
+                    let sdk_c = sdk.clone();
+                    let cfg_c = cfg.clone();
+                    let cancel_c = cancel.clone();
+                    tokio::spawn(async move {
+                        maybe_rotate_ip(&app_c, &sdk_c, &cfg_c, &cancel_c).await;
+                        let _ = tx.send(true);
+                    });
+                }
+            }
+        }
+
+        for h in handles {
+            let _ = h.await;
+        }
+
+        let adb2 = Adb::new(&sdk, state.adb_server_port);
+        let avdm2 = AvdManager::new(&sdk, adb2.env().clone());
+        registry.cleanup(&adb2, &avdm2).await;
+        let stats = proxy.snapshot().await;
+        proxy.stop();
+
+        let devices = results.lock().await.clone();
+        let ok = devices.iter().filter(|d| d.status == "ok").count() as u32;
+        let fail = devices.iter().filter(|d| d.status == "fail").count() as u32;
+
+        let result = crate::report::RunResult {
+            run_id: run_id.clone(),
+            api_level: extract_api_level(&cfg.system_image),
+            reset_level: cfg.reset_level.as_str().into(),
+            target: total_count,
+            ok,
+            fail,
+            timezone_note: "所有时间戳为北京时间（UTC+8）；已启用动态堆栈防重与概率轮换".into(),
+            started_at,
+            finished_at: beijing_now(),
+            devices,
+            compliance_ack: true,
+        };
+        let _ = result.save(&run_dir).await;
+
+        emit_state(&app, "batch://progress", serde_json::json!({
+            "ok": ok, "fail": fail, "running": 0, "queued": 0,
+            "done": true, "umeng_hits": stats.umeng_hits,
+        }));
+
+        return Ok(result);
+    }
+
     let mut handles = Vec::new();
 
-    for slot in 0..concurrency {
-        let app = app.clone();
-        let cfg = cfg.clone();
-        let results = results.clone();
-        let registry = registry.clone();
-        let cancel = cancel.clone();
-        let sdk = sdk.clone();
-        let adb_port = state.adb_server_port;
-        let run_dir_slot = run_dir.clone();
+    // ---- Phase 0：身份档案回放（方案 A：300+ 留存场景）----
+    if replay_count > 0 {
+        let mut profiles = crate::engine::profile_archive::ProfileArchiveManager::load_all(&state.profiles_dir).await;
+        // 随机抽取：按时间戳微秒伪随机打乱已保存的档案序列，实现每次运行随机抽取不同留存档案
+        if !profiles.is_empty() {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let len = profiles.len();
+            for i in (1..len).rev() {
+                let j = (nanos as usize + i * 17 + 31) % (i + 1);
+                profiles.swap(i, j);
+            }
+        }
+        let to_replay: Vec<_> = profiles.into_iter().take(replay_count as usize).collect();
+        let concurrency_p = cfg.concurrency.min(to_replay.len() as u32).min(8);
 
-        handles.push(tokio::spawn(async move {
-            slot_worker(app, sdk, adb_port, slot, cfg, results, registry, proxy_addr, cancel, run_dir_slot).await;
-        }));
-        // 错开启动，避免同时抢 adb server 和磁盘
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        let mut current_ip_rx: Option<tokio::sync::watch::Receiver<bool>> = None;
+        if !to_replay.is_empty() {
+            for (batch_idx, chunk) in to_replay.chunks(concurrency_p as usize).enumerate() {
+                for (i, prof) in chunk.iter().enumerate() {
+                    let app_w = app.clone();
+                    let cfg_w = cfg.clone();
+                    let results = results.clone();
+                    let cancel_w = cancel.clone();
+                    let sdk_w = sdk.clone();
+                    let adb_port = state.adb_server_port;
+                    let prof = prof.clone();
+                    let device_index = (batch_idx * concurrency_p as usize + i + 1) as u32;
+                    let slot = i as u32;
+                    let proxy_addr_p = if cfg.use_proxy { Some(proxy_addr) } else { None };
+                    let registry_p = registry.clone();
+                    let ip_rx = current_ip_rx.clone();
+
+                    handles.push(tokio::spawn(async move {
+                        profile_replay_worker(
+                            app_w, sdk_w, adb_port, slot, device_index, cfg_w,
+                            results, registry_p, prof, proxy_addr_p, cancel_w,
+                            ip_rx,
+                        ).await;
+                    }));
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                }
+                for h in handles.drain(..) {
+                    let _ = h.await;
+                }
+                if ((batch_idx + 1) * concurrency_p as usize) < to_replay.len() && !cancel.is_cancelled() && cfg.auto_rotate_ip {
+                    let (tx, rx) = tokio::sync::watch::channel(false);
+                    current_ip_rx = Some(rx);
+                    let app_c = app.clone();
+                    let sdk_c = sdk.clone();
+                    let cfg_c = cfg.clone();
+                    let cancel_c = cancel.clone();
+                    tokio::spawn(async move {
+                        maybe_rotate_ip(&app_c, &sdk_c, &cfg_c, &cancel_c).await;
+                        let _ = tx.send(true);
+                    });
+                }
+            }
+        }
     }
 
-    for h in handles {
-        let _ = h.await;
+    // ---- Phase A：留存设备（从设备池复用已有 AVD）----
+    if retention_count > 0 {
+        let mut pool = crate::engine::pool::DevicePool::load(&state.pool_file).await;
+
+        // 池中设备不足时自动扩容
+        while (pool.len() as u32) < retention_count {
+            let info = crate::avd::random_device_info();
+            pool.add_device(&info);
+        }
+        let _ = pool.save(&state.pool_file).await;
+
+        let pool_devices = pool.acquire(retention_count);
+        let concurrency_r = cfg.concurrency.min(retention_count).min(8);
+        let mut current_ip_rx: Option<tokio::sync::watch::Receiver<bool>> = None;
+
+        // 留存设备按批次串行调度（每批 concurrency_r 台并发）
+        for (batch_idx, chunk) in pool_devices.chunks(concurrency_r as usize).enumerate() {
+            for (i, pool_dev) in chunk.iter().enumerate() {
+                let app_w = app.clone();
+                let cfg_w = cfg.clone();
+                let results = results.clone();
+                let cancel_w = cancel.clone();
+                let sdk_w = sdk.clone();
+                let adb_port = state.adb_server_port;
+                let pool_dev = pool_dev.clone();
+                let pool_file = state.pool_file.clone();
+                let device_index = replay_count + (batch_idx * concurrency_r as usize + i + 1) as u32;
+                let slot = i as u32;
+                let proxy_addr_r = if cfg.use_proxy { Some(proxy_addr) } else { None };
+                let ip_rx = current_ip_rx.clone();
+
+                handles.push(tokio::spawn(async move {
+                    retention_worker(
+                        app_w, sdk_w, adb_port, slot, device_index, cfg_w,
+                        results, pool_dev, pool_file, proxy_addr_r, cancel_w,
+                        ip_rx,
+                    ).await;
+                }));
+                tokio::time::sleep(Duration::from_secs(3)).await;
+            }
+            // 等当前批次完成再启下一批
+            for h in handles.drain(..) {
+                let _ = h.await;
+            }
+            if ((batch_idx + 1) * concurrency_r as usize) < pool_devices.len() && !cancel.is_cancelled() && cfg.auto_rotate_ip {
+                let (tx, rx) = tokio::sync::watch::channel(false);
+                current_ip_rx = Some(rx);
+                let app_c = app.clone();
+                let sdk_c = sdk.clone();
+                let cfg_c = cfg.clone();
+                let cancel_c = cancel.clone();
+                tokio::spawn(async move {
+                    maybe_rotate_ip(&app_c, &sdk_c, &cfg_c, &cancel_c).await;
+                    let _ = tx.send(true);
+                });
+            }
+        }
     }
 
-    // 清场
+    // ---- Phase B：新增设备（一次性 AVD，现有 L3 流程）----
+    if new_count > 0 {
+        // 更新 count 以适配 slot_worker 的分片逻辑
+        let mut new_cfg = (*cfg).clone();
+        new_cfg.count = new_count;
+        let new_cfg = Arc::new(new_cfg);
+
+        let concurrency_n = new_cfg.concurrency.min(new_count).min(8);
+
+        for slot in 0..concurrency_n {
+            let app = app.clone();
+            let cfg = new_cfg.clone();
+            let results = results.clone();
+            let registry = registry.clone();
+            let cancel = cancel.clone();
+            let sdk = sdk.clone();
+            let adb_port = state.adb_server_port;
+            let run_dir_slot = run_dir.clone();
+
+            handles.push(tokio::spawn(async move {
+                slot_worker(app, sdk, adb_port, slot, cfg, results, registry, proxy_addr, cancel, run_dir_slot).await;
+            }));
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+
+        for h in handles {
+            let _ = h.await;
+        }
+    }
+
+    // 清场（只清理一次性 AVD，不删除池设备）
     let adb2 = Adb::new(&sdk, state.adb_server_port);
     let avdm2 = AvdManager::new(&sdk, adb2.env().clone());
     registry.cleanup(&adb2, &avdm2).await;
@@ -700,7 +1125,7 @@ pub async fn batch_run(
         run_id: run_id.clone(),
         api_level: extract_api_level(&cfg.system_image),
         reset_level: cfg.reset_level.as_str().into(),
-        target: cfg.count,
+        target: total,
         ok,
         fail,
         timezone_note: "所有时间戳为北京时间（UTC+8）；批次覆盖自然日以 started_at 为准".into(),
@@ -717,6 +1142,540 @@ pub async fn batch_run(
     }));
 
     Ok(result)
+}
+
+/// 身份档案回放工作线程（方案 A：300+ 留存）
+/// 还原档案中的 ANDROID_ID (SSAID) 与 shared_prefs XML，友盟识别为对应老用户回访
+#[allow(clippy::too_many_arguments)]
+async fn profile_replay_worker(
+    app: AppHandle,
+    sdk: std::path::PathBuf,
+    adb_port: u16,
+    slot: u32,
+    device_index: u32,
+    cfg: Arc<EngineConfig>,
+    results: Arc<tokio::sync::Mutex<Vec<DeviceResult>>>,
+    registry: Arc<AvdRegistry>,
+    prof: crate::engine::profile_archive::IdentityProfile,
+    proxy_addr: Option<std::net::SocketAddr>,
+    cancel: CancellationToken,
+    ip_ready_rx: Option<tokio::sync::watch::Receiver<bool>>,
+) {
+    let adb = Adb::new(&sdk, adb_port);
+    let avdm = AvdManager::new(&sdk, adb.env().clone());
+    let emulator = Emulator::new(&sdk, adb.env().clone());
+    let avd = format!("dau-replay-{}-{}", slot, std::process::id());
+    let port = 5554 + slot as u16 * 2;
+    let serial = format!("emulator-{}", port);
+    let started = std::time::Instant::now();
+    let started_at = beijing_now();
+
+    if cancel.is_cancelled() {
+        return;
+    }
+
+    let _ = adb.emu_kill(&serial).await;
+    if !crate::avd::wait_port_free(port, 2).await {
+        crate::avd::kill_emulator_on_port(port).await;
+        let _ = crate::avd::wait_port_free(port, 3).await;
+    }
+
+    if avdm.create(&avd, &cfg.system_image, &cfg.device_profile).await.is_err() {
+        push_result(&app, &results, DeviceResult {
+            index: device_index, slot, status: "fail".into(),
+            error: Some("档案回放: 创建 AVD 失败".into()),
+            reset_level: "archive-replay".into(),
+            started_at,
+            ..Default::default()
+        }).await;
+        return;
+    }
+    registry.register(&avd, port).await;
+
+    // 使用档案保存的硬件品牌属性（保持与建库时一致）
+    let opts = BootOpts {
+        wipe: true,
+        mem_mb: Some(cfg.emu_mem_mb),
+        http_proxy: proxy_addr,
+        max_users: None,
+        props: prof.to_boot_props(),
+    };
+
+    if emulator.boot(&avd, port, &opts).await.is_err()
+        || adb.wait_boot(&serial, Duration::from_secs(cfg.boot_timeout_s as u64)).await.is_err()
+    {
+        push_result(&app, &results, DeviceResult {
+            index: device_index, slot, status: "fail".into(),
+            error: Some("档案回放: 启动失败".into()),
+            reset_level: "archive-replay".into(),
+            started_at,
+            ..Default::default()
+        }).await;
+        let _ = adb.emu_kill(&serial).await;
+        return;
+    }
+
+    // 关键步骤：覆盖真机设备型号（修改 build.prop 并重载），确保友盟统计获取到真实的档案机型而非 sdk_gphone
+    crate::uiautomation::prepare::apply_device_spoofing(&adb, &emulator, &avd, port, &opts).await;
+
+    // 关键优化：冷启动完成，等待换 IP 在后台就绪（二者完全并行，几乎零额外等待）
+    wait_ip_ready(ip_ready_rx).await;
+
+    if adb.wait_net(&serial).await.is_err()
+        || adb.install(&serial, Path::new(&cfg.apk_path), None).await.is_err()
+    {
+        push_result(&app, &results, DeviceResult {
+            index: device_index, slot, status: "fail".into(),
+            error: Some("档案回放: 网络/装包失败".into()),
+            reset_level: "archive-replay".into(),
+            started_at,
+            ..Default::default()
+        }).await;
+        let _ = adb.emu_kill(&serial).await;
+        return;
+    }
+
+    // 关键步骤：还原档案中的 ANDROID_ID (SSAID) 与 shared_prefs XML
+    if let Err(e) = crate::engine::profile_archive::restore_to_device(&adb, &serial, &cfg.pkg, &prof).await {
+        tracing::warn!(profile_id = %prof.profile_id, error = %e, "档案还原警告，继续尝试运行");
+    }
+
+    let ctx = SlotCtx {
+        adb: adb.clone(),
+        avdm: avdm.clone(),
+        emulator: emulator.clone(),
+        config: cfg.clone(),
+        registry: registry.clone(),
+        proxy_addr,
+        cancel: cancel.clone(),
+    };
+
+    let mut result = DeviceResult {
+        index: device_index,
+        slot,
+        status: "fail".into(),
+        reset_level: "archive-replay".into(),
+        started_at,
+        is_retention: true,
+        device_model: format!("{} {}", prof.brand, prof.model),
+        ..Default::default()
+    };
+
+    match run_app(&ctx, port, None, device_index).await {
+        Ok(outcome) => {
+            result.prepare = outcome.prepare;
+            result.onboarding = outcome.onboarding;
+            result.coverage = outcome.coverage;
+        }
+        Err(e) => {
+            result.error = Some(format!("档案回放运行失败: {}", e));
+            result.duration_s = started.elapsed().as_secs_f64();
+            let _ = adb.emu_kill(&serial).await;
+            push_result(&app, &results, result).await;
+            return;
+        }
+    }
+
+    let id = crate::identity::extract(&adb, &serial, &cfg.pkg, None).await;
+    result.android_id = if !id.android_id.is_empty() { id.android_id } else { prof.android_id };
+    result.umid = if !id.umid.is_empty() { id.umid } else { prof.umid };
+    result.status = "ok".into();
+    result.duration_s = started.elapsed().as_secs_f64();
+
+    tracing::info!(
+        device_index,
+        profile_id = %prof.profile_id,
+        android_id = %result.android_id,
+        model = %result.device_model,
+        "【留存设备测试成功】已成功从档案库调取身份档案并完成运行"
+    );
+
+    let _ = adb.emu_kill(&serial).await;
+    push_result(&app, &results, result).await;
+}
+
+/// 执行单台 L3 新增设备，成功后进行 50%-70% 概率入栈与出栈 (FIFO Eviction)
+#[allow(clippy::too_many_arguments)]
+async fn run_single_l3_and_push_stack(
+    app: AppHandle,
+    sdk: std::path::PathBuf,
+    adb_port: u16,
+    slot: u32,
+    device_index: u32,
+    cfg: Arc<EngineConfig>,
+    results: Arc<tokio::sync::Mutex<Vec<DeviceResult>>>,
+    registry: Arc<AvdRegistry>,
+    proxy_addr: Option<std::net::SocketAddr>,
+    stack_file: std::path::PathBuf,
+    cancel: CancellationToken,
+    ip_ready_rx: Option<tokio::sync::watch::Receiver<bool>>,
+) {
+    let adb = Adb::new(&sdk, adb_port);
+    let avdm = AvdManager::new(&sdk, adb.env().clone());
+    let emulator = Emulator::new(&sdk, adb.env().clone());
+    let is_l25 = cfg.reset_level == crate::engine::ResetLevel::L25;
+    let is_l3 = cfg.reset_level == crate::engine::ResetLevel::L3;
+
+    // 槽位 AVD 名字采用固定名称，实现多台间复用同台模拟器（无需每次都创建新 AVD / 冷启动）
+    let avd = if is_l25 {
+        format!("dau-slot-{}", slot)
+    } else {
+        format!("dau-stack-{}-{}", slot, std::process::id())
+    };
+    let port = 5554 + slot as u16 * 2;
+    let serial = format!("emulator-{}", port);
+    let started = std::time::Instant::now();
+    let started_at = beijing_now();
+
+    if cancel.is_cancelled() {
+        return;
+    }
+
+    // 检查槽位模拟器是否已经在在线运行中
+    let is_running = adb.shell(&serial, &["getprop", "sys.boot_completed"])
+        .await
+        .unwrap_or_default()
+        .trim() == "1";
+
+    if !is_running {
+        if avdm.create(&avd, &cfg.system_image, &cfg.device_profile).await.is_err() {
+            push_result(&app, &results, DeviceResult {
+                index: device_index, slot, status: "fail".into(),
+                error: Some(format!("{} 设备: 创建 AVD 失败", cfg.reset_level.as_str())),
+                reset_level: if is_l25 { "L2.5 多用户".into() } else { cfg.reset_level.as_str().into() },
+                started_at,
+                ..Default::default()
+            }).await;
+            return;
+        }
+        registry.register(&avd, port).await;
+    }
+
+    // 同一槽位 AVD 复用：机型按 AVD 名固定，首次 L3 完整伪装后 build.prop 持久，
+    // 后续 L3 wipe 重启命中 spoofing 早退（省 root/remount/重启）→ 单启动。
+    // info 与 props 必须来自同一确定性 profile，保证型号显示/档案与实际伪装一致。
+    let info = crate::avd::device_info_for_avd(&avd);
+    let opts = BootOpts {
+        wipe: is_l3, // 仅 L3 恢复出厂才执行 wipe-data
+        mem_mb: Some(cfg.emu_mem_mb),
+        http_proxy: proxy_addr,
+        max_users: cfg.max_users,
+        props: crate::avd::device_props_from_info(&info),
+    };
+
+    if is_l25 && is_running {
+        tracing::info!(device_index, serial = %serial, "⚡ [L2.5 多用户] 复用当前槽位已开机模拟器，无需重新冷启动！");
+    } else if is_l3 && is_running {
+        // 关键优化：如果当前槽位模拟器在线且已完成指纹注入，直接调用 reset_device_in_place，
+        // 彻底清理前序应用数据与 SSAID，热重启 Zygote 生成全新合法 ANDROID_ID，跳过冷启动与二次改写！
+        tracing::info!(device_index, serial = %serial, "⚡ [L3 新增] 复用当前槽位已开机且已注入指纹的模拟器，执行单启动极速重置！");
+        if let Err(e) = crate::uiautomation::prepare::reset_device_in_place(&adb, &serial, &cfg.pkg).await {
+            tracing::warn!("reset_device_in_place 遇到警告 ({})，继续运行", e);
+        }
+    } else {
+        if emulator.boot(&avd, port, &opts).await.is_err()
+            || adb.wait_boot(&serial, Duration::from_secs(cfg.boot_timeout_s as u64)).await.is_err()
+        {
+            push_result(&app, &results, DeviceResult {
+                index: device_index, slot, status: "fail".into(),
+                error: Some(format!("{} 设备启动失败", cfg.reset_level.as_str())),
+                reset_level: if is_l25 { "L2.5 多用户".into() } else { cfg.reset_level.as_str().into() },
+                started_at,
+                ..Default::default()
+            }).await;
+            let _ = adb.emu_kill(&serial).await;
+            return;
+        }
+        if is_l3 {
+            crate::uiautomation::prepare::apply_device_spoofing(&adb, &emulator, &avd, port, &opts).await;
+        }
+    }
+
+    // 关键优化：冷启动与指纹注入完成，等待换 IP 在后台就绪（二者完全并行，大幅减少总执行耗时）
+    wait_ip_ready(ip_ready_rx).await;
+
+    if adb.wait_net(&serial).await.is_err() {
+        push_result(&app, &results, DeviceResult {
+            index: device_index, slot, status: "fail".into(),
+            error: Some(format!("{} 设备网络未就序", cfg.reset_level.as_str())),
+            reset_level: if is_l25 { "L2.5 多用户".into() } else { cfg.reset_level.as_str().into() },
+            started_at,
+            ..Default::default()
+        }).await;
+        let _ = adb.emu_kill(&serial).await;
+        return;
+    }
+
+    // 处理 L2.5 多用户创建（如果配置的是 L2.5）
+    let user_id = if is_l25 {
+        let _ = adb.cleanup_users_by_prefix(&serial, "dau_").await;
+        match adb.create_user(&serial, &format!("dau_{}", port)).await {
+            Ok(uid) => {
+                let _ = adb.start_user(&serial, uid).await;
+                let _ = adb.install(&serial, Path::new(&cfg.apk_path), Some(uid)).await;
+                Some(uid)
+            }
+            Err(e) => {
+                push_result(&app, &results, DeviceResult {
+                    index: device_index, slot, status: "fail".into(),
+                    error: Some(format!("L2.5 创建多用户失败: {}", e)),
+                    reset_level: "L2.5 多用户".into(),
+                    started_at,
+                    ..Default::default()
+                }).await;
+                let _ = adb.emu_kill(&serial).await;
+                return;
+            }
+        }
+    } else {
+        if adb.install(&serial, Path::new(&cfg.apk_path), None).await.is_err() {
+            push_result(&app, &results, DeviceResult {
+                index: device_index, slot, status: "fail".into(),
+                error: Some(format!("{} 设备装包失败", cfg.reset_level.as_str())),
+                reset_level: cfg.reset_level.as_str().into(),
+                started_at,
+                ..Default::default()
+            }).await;
+            let _ = adb.emu_kill(&serial).await;
+            return;
+        }
+        None
+    };
+
+    let ctx = SlotCtx {
+        adb: adb.clone(),
+        avdm: avdm.clone(),
+        emulator: emulator.clone(),
+        config: cfg.clone(),
+        registry: registry.clone(),
+        proxy_addr,
+        cancel: cancel.clone(),
+    };
+
+    let reset_label = if is_l25 {
+        "L2.5 多用户".to_string()
+    } else {
+        cfg.reset_level.as_str().to_string()
+    };
+
+    let mut result = DeviceResult {
+        index: device_index,
+        slot,
+        status: "fail".into(),
+        reset_level: reset_label,
+        started_at,
+        is_retention: false,
+        device_model: format!("{} {}", info.brand, info.model),
+        ..Default::default()
+    };
+
+    match run_app(&ctx, port, user_id, device_index).await {
+        Ok(outcome) => {
+            result.prepare = outcome.prepare;
+            result.onboarding = outcome.onboarding;
+            result.coverage = outcome.coverage;
+        }
+        Err(e) => {
+            result.error = Some(format!("设备运行失败: {}", e));
+            result.duration_s = started.elapsed().as_secs_f64();
+            if let Some(uid) = user_id {
+                let _ = adb.switch_user(&serial, 0).await;
+                let _ = adb.remove_user(&serial, uid).await;
+            }
+            let _ = adb.emu_kill(&serial).await;
+            push_result(&app, &results, result).await;
+            return;
+        }
+    }
+
+    let id = crate::identity::extract(&adb, &serial, &cfg.pkg, user_id).await;
+    result.android_id = id.android_id;
+    result.umid = id.umid;
+    result.status = "ok".into();
+    result.duration_s = started.elapsed().as_secs_f64();
+
+    // 清理 L2.5 多用户
+    if let Some(uid) = user_id {
+        let _ = adb.switch_user(&serial, 0).await;
+        let _ = adb.remove_user(&serial, uid).await;
+    }
+
+
+    // 成功后备份档案并根据 50%-70% 概率推入堆栈 (处理容量与 FIFO 淘汰)
+    if !result.android_id.is_empty() {
+        let profile_id = format!("prof-{:04}", device_index);
+        if let Ok(prof) = crate::engine::profile_archive::backup_from_device(
+            &adb, &serial, &cfg.pkg, &profile_id, &info
+        ).await {
+            let mut stack = crate::engine::profile_stack::ProfileStackStore::load(&stack_file).await;
+            stack.capacity = cfg.stack_capacity as usize;
+            let today = crate::engine::profile_stack::ProfileStackStore::beijing_now_info().0;
+            let pushed = stack.push_new_profile(prof, cfg.full_push_probability, Some(&today));
+            let _ = stack.save(&stack_file).await;
+            if pushed {
+                tracing::info!(device_index, "新设备已成功推入堆栈（并锁定为今天已使用，次日/重置后可复用为留存）");
+            }
+        }
+    }
+
+    // L2.5 多用户模式与 L3 模式下保持模拟器开机，供同槽位后续设备极速复用（单启动 ~50s）
+    // 批次完成或取消停止时由 registry.cleanup 统一进行安全清理
+    push_result(&app, &results, result).await;
+}
+
+/// 留存设备工作线程：复用已有池 AVD，不 wipe，保留 ANDROID_ID → 友盟识别为老用户回访
+#[allow(clippy::too_many_arguments)]
+async fn retention_worker(
+    app: AppHandle,
+    sdk: std::path::PathBuf,
+    adb_port: u16,
+    slot: u32,
+    device_index: u32,
+    cfg: Arc<EngineConfig>,
+    results: Arc<tokio::sync::Mutex<Vec<DeviceResult>>>,
+    pool_dev: crate::engine::pool::PoolDevice,
+    pool_file: std::path::PathBuf,
+    proxy_addr: Option<std::net::SocketAddr>,
+    cancel: CancellationToken,
+    ip_ready_rx: Option<tokio::sync::watch::Receiver<bool>>,
+) {
+    let adb = Adb::new(&sdk, adb_port);
+    let avdm = AvdManager::new(&sdk, adb.env().clone());
+    let emulator = Emulator::new(&sdk, adb.env().clone());
+    let port = 5554 + slot as u16 * 2;
+    let serial = format!("emulator-{}", port);
+    let avd = &pool_dev.avd_name;
+    let started = std::time::Instant::now();
+    let started_at = beijing_now();
+
+    if cancel.is_cancelled() {
+        return;
+    }
+
+    // 确保 AVD 存在（首次使用时创建）
+    if avdm.create(avd, &cfg.system_image, &cfg.device_profile).await.is_err() {
+        push_result(&app, &results, DeviceResult {
+            index: device_index, slot, status: "fail".into(),
+            error: Some("留存设备: 创建 AVD 失败".into()),
+            reset_level: "retention".into(),
+            started_at,
+            ..Default::default()
+        }).await;
+        return;
+    }
+
+    // 使用池设备固定的品牌/型号属性（不随机），保持跨天一致性
+    let opts = BootOpts {
+        wipe: false, // 关键：不 wipe，保留 ANDROID_ID
+        mem_mb: Some(cfg.emu_mem_mb),
+        http_proxy: proxy_addr,
+        max_users: None,
+        props: pool_dev.to_boot_props(),
+    };
+
+    let boot_result = emulator.boot(avd, port, &opts).await;
+    if boot_result.is_err()
+        || adb.wait_boot(&serial, Duration::from_secs(cfg.boot_timeout_s as u64)).await.is_err()
+    {
+        push_result(&app, &results, DeviceResult {
+            index: device_index, slot, status: "fail".into(),
+            error: Some("留存设备: 启动失败".into()),
+            reset_level: "retention".into(),
+            started_at,
+            ..Default::default()
+        }).await;
+        let _ = adb.emu_kill(&serial).await;
+        return;
+    }
+
+    // 覆盖真机设备型号（修改 build.prop 并重载），确保留存设备为真实机型
+    crate::uiautomation::prepare::apply_device_spoofing(&adb, &emulator, avd, port, &opts).await;
+
+    // 关键优化：冷启动完成，等待换 IP 在后台就绪（二者完全并行，几乎零额外等待）
+    wait_ip_ready(ip_ready_rx).await;
+
+    if adb.wait_net(&serial).await.is_err() {
+        push_result(&app, &results, DeviceResult {
+            index: device_index, slot, status: "fail".into(),
+            error: Some("留存设备: 网络就绪超时".into()),
+            reset_level: "retention".into(),
+            started_at,
+            ..Default::default()
+        }).await;
+        let _ = adb.emu_kill(&serial).await;
+        return;
+    }
+
+    // L1 重置 App 数据（清除 App 缓存但保留设备身份）
+    let _ = adb.pm_clear(&serial, &cfg.pkg).await;
+
+    // 重新安装 APK（install -r 覆盖安装，兼容 APK 版本更新）
+    if adb.install(&serial, Path::new(&cfg.apk_path), None).await.is_err() {
+        push_result(&app, &results, DeviceResult {
+            index: device_index, slot, status: "fail".into(),
+            error: Some("留存设备: 装包失败".into()),
+            reset_level: "retention".into(),
+            started_at,
+            ..Default::default()
+        }).await;
+        let _ = adb.emu_kill(&serial).await;
+        return;
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // 运行 App（与新增设备共用同一流程）
+    let ctx = SlotCtx {
+        adb: adb.clone(),
+        avdm,
+        emulator,
+        config: cfg.clone(),
+        registry: Arc::new(AvdRegistry::new(Path::new("/dev/null"))),
+        proxy_addr,
+        cancel: cancel.clone(),
+    };
+
+    let mut result = DeviceResult {
+        index: device_index,
+        slot,
+        status: "fail".into(),
+        reset_level: "retention".into(),
+        started_at,
+        is_retention: true,
+        device_model: format!("{} {}", pool_dev.brand, pool_dev.model),
+        ..Default::default()
+    };
+
+    match run_app(&ctx, port, None, device_index).await {
+        Ok(outcome) => {
+            result.prepare = outcome.prepare;
+            result.onboarding = outcome.onboarding;
+            result.coverage = outcome.coverage;
+        }
+        Err(e) => {
+            result.error = Some(format!("留存设备运行失败: {}", e));
+            result.duration_s = started.elapsed().as_secs_f64();
+            let _ = adb.emu_kill(&serial).await;
+            push_result(&app, &results, result).await;
+            return;
+        }
+    }
+
+    // 提取标识
+    let id = crate::identity::extract(&adb, &serial, &cfg.pkg, None).await;
+    result.android_id = id.android_id.clone();
+    result.umid = id.umid;
+    result.status = "ok".into();
+    result.duration_s = started.elapsed().as_secs_f64();
+
+    // 更新池设备的 android_id 和 last_used_at
+    let mut pool = crate::engine::pool::DevicePool::load(&pool_file).await;
+    pool.update_device(avd, &id.android_id);
+    let _ = pool.save(&pool_file).await;
+
+    // 关机但不删除 AVD（留待下次复用）
+    let _ = adb.emu_kill(&serial).await;
+
+    push_result(&app, &results, result).await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -765,7 +1724,7 @@ async fn slot_worker(
         mem_mb: Some(cfg.emu_mem_mb),
         http_proxy: ctx.proxy_addr,
         max_users: cfg.max_users,
-        props: crate::avd::random_device_props(),
+        props: crate::avd::device_props_for_avd(&avd),
     };
     if emulator.boot(&avd, port, &opts).await.is_err()
         || adb.wait_boot(&serial, Duration::from_secs(cfg.boot_timeout_s as u64)).await.is_err()
@@ -847,6 +1806,8 @@ impl Default for DeviceResult {
             duration_s: 0.0,
             reset_level: String::new(),
             started_at: String::new(),
+            is_retention: false,
+            device_model: String::new(),
             prepare: None,
             onboarding: None,
             coverage: None,

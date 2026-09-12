@@ -31,3 +31,9 @@ export async function onBatchProgress(
 ): Promise<UnlistenFn> {
   return listen("batch://progress", (e) => cb(e.payload as any));
 }
+
+export async function onBatchIpStatus(
+  cb: (p: { rotating: boolean; message: string; ip?: string }) => void
+): Promise<UnlistenFn> {
+  return listen("batch://ip_status", (e) => cb(e.payload as any));
+}

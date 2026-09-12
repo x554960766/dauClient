@@ -51,13 +51,15 @@ pub fn render_markdown(result: &RunResult) -> String {
     md.push_str("> 差值不要抹平——它本身就是「友盟对 Android 模拟器流量的过滤率」这个测试结论。\n\n");
 
     md.push_str("## 逐台明细\n\n");
-    md.push_str("| # | 槽位 | 状态 | ANDROID_ID | UMID | 代理命中 | 耗时(s) | 错误 |\n");
-    md.push_str("|---|---|---|---|---|---|---|---|\n");
+    md.push_str("| # | 槽位 | 模式 | 设备型号 | 状态 | ANDROID_ID | UMID | 代理命中 | 耗时(s) | 错误 |\n");
+    md.push_str("|---|---|---|---|---|---|---|---|---|---|\n");
     for d in &result.devices {
         md.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {:.1} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {:.1} | {} |\n",
             d.index,
             d.slot,
+            if d.is_retention { "留存" } else { "新增" },
+            if d.device_model.is_empty() { "—" } else { &d.device_model },
             d.status,
             if d.android_id.is_empty() { "—" } else { &d.android_id },
             if d.umid.is_empty() { "—" } else { &d.umid },

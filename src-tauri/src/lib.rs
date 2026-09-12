@@ -60,7 +60,11 @@ pub fn run() {
                     if let Ok(list) = avdm.list().await {
                         let ours: Vec<String> = list
                             .into_iter()
-                            .filter(|n| n.starts_with("dau-") || n.starts_with("dau_") || n.contains("dau"))
+                            .filter(|n| {
+                                // 清理一次性 dau- AVD，但保留 pool- 设备池 AVD（留存方案）
+                                (n.starts_with("dau-") || n.starts_with("dau_") || n.contains("dau"))
+                                    && !n.starts_with("pool-")
+                            })
                             .collect();
                         if !ours.is_empty() {
                             tracing::info!(count = ours.len(), "应用启动：自动清理上次异常挂掉遗留的 AVD: {:?}", ours);
@@ -90,6 +94,14 @@ pub fn run() {
             commands::export_report,
             commands::reconcile_t_plus_1,
             commands::list_runs,
+            commands::pool_status,
+            commands::pool_clear,
+            commands::list_profiles,
+            commands::clear_profiles,
+            commands::get_stack_status,
+            commands::reset_profile_usage,
+            commands::detect_usb_phones,
+            commands::test_rotate_ip,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

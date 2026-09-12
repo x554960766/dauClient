@@ -141,14 +141,14 @@ impl CoverageWalker {
                 iac.dwell_ms(800).await;
                 let d2 = self.dump_once().await.ok();
                 if d2.as_ref().map(|d| d.top_package.as_str() == self.pkg.as_str()) != Some(true) {
-                    // 回不来 → 重新 launch
-                    let _ = self.adb.launch_app(&self.serial, &self.pkg, None).await;
+                    // 回不来 → 快速重新拉起前台
+                    let _ = self.adb.launch_app_fast(&self.serial, &self.pkg, None).await;
                     iac.dwell_ms(2000).await;
                     report.relaunches += 1;
                     back_streak = 0;
                 }
                 if back_streak >= self.cfg.max_back_before_relaunch.max(1) {
-                    let _ = self.adb.launch_app(&self.serial, &self.pkg, None).await;
+                    let _ = self.adb.launch_app_fast(&self.serial, &self.pkg, None).await;
                     iac.dwell_ms(2000).await;
                     report.relaunches += 1;
                     back_streak = 0;

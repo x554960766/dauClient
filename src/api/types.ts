@@ -30,6 +30,28 @@ export interface EngineConfig {
   emu_mem_mb: number;
   use_proxy: boolean;
   max_users: number | null;
+  stack_capacity?: number;
+  l3_probability?: number;
+  full_push_probability?: number;
+  enable_stack_mode?: boolean;
+  app_label?: string;
+  auto_rotate_ip?: boolean;
+  rotate_ip_serial?: string | null;
+  rotate_ip_disconnect_wait_s?: number;
+  rotate_ip_reconnect_wait_s?: number;
+}
+
+export interface UsbPhoneInfo {
+  serial: string;
+  model: string;
+  status: string;
+}
+
+export interface RotateIpResult {
+  success: boolean;
+  old_ip: string;
+  new_ip: string;
+  message: string;
 }
 
 export interface PreflightItem {
@@ -50,6 +72,7 @@ export interface PreflightReport {
 
 export interface ApkInfo {
   pkg: string;
+  app_label?: string;
   appkey: string;
   debuggable: boolean;
   min_sdk: string;
@@ -74,6 +97,16 @@ export interface DeviceResult {
   duration_s: number;
   reset_level: string;
   started_at: string;
+  is_retention?: boolean;
+  device_model?: string;
+}
+
+export interface StackStatusReport {
+  capacity: number;
+  total_entries: number;
+  available_today: number;
+  used_today: number;
+  last_cleared_date: string | null;
 }
 
 export interface ReconcileReport {

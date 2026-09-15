@@ -69,7 +69,7 @@
             </n-space>
 
             <div v-if="app.config.auto_rotate_ip" style="background: rgba(0,0,0,0.02); padding: 8px 12px; border-radius: 6px; border: 1px dashed #d9d9d9">
-              <n-space align="center" style="margin-bottom: 4px">
+              <n-space align="center" style="margin-bottom: 8px">
                 <span style="font-size: 13px">已识别真机：</span>
                 <n-tag v-if="detectedPhones.length > 0" type="success" size="small">
                   {{ detectedPhones.map(p => `${p.model} (${p.serial})`).join('、') }}
@@ -78,9 +78,33 @@
                   未检测到 USB 连接的安卓真机（请检查 USB 连线、调试权限与网络共享）
                 </n-tag>
               </n-space>
+
+              <n-grid :cols="2" :x-gap="12" style="margin-bottom: 8px">
+                <n-gi>
+                  <n-form-item label="手机热点名称 (SSID)" :show-feedback="false">
+                    <n-input
+                      v-model:value="app.config.rotate_ip_hotspot_ssid"
+                      placeholder="如: P70 (Mac 自动强连，留空则不强制)"
+                      size="small"
+                    />
+                  </n-form-item>
+                </n-gi>
+                <n-gi>
+                  <n-form-item label="手机热点密码" :show-feedback="false">
+                    <n-input
+                      v-model:value="app.config.rotate_ip_hotspot_password"
+                      type="password"
+                      show-password-on="click"
+                      placeholder="如: 123456789"
+                      size="small"
+                    />
+                  </n-form-item>
+                </n-gi>
+              </n-grid>
+
               <n-space align="center">
                 <n-text depth="3" style="font-size: 12px">
-                  断网保持: {{ app.config.rotate_ip_disconnect_wait_s || 4 }}s ｜ 恢复等待: {{ app.config.rotate_ip_reconnect_wait_s || 6 }}s ｜ 自动守护 USB 网络共享 (RNDIS)
+                  断网保持: {{ app.config.rotate_ip_disconnect_wait_s || 4 }}s ｜ 恢复等待: {{ app.config.rotate_ip_reconnect_wait_s || 6 }}s ｜ 自动守护 USB 网络共享 (RNDIS) 与 Mac Wi-Fi 热点
                 </n-text>
               </n-space>
             </div>
@@ -328,6 +352,8 @@ async function manualTestRotateIp() {
       serial: app.config.rotate_ip_serial || undefined,
       disconnect_wait_s: app.config.rotate_ip_disconnect_wait_s,
       reconnect_wait_s: app.config.rotate_ip_reconnect_wait_s,
+      hotspot_ssid: app.config.rotate_ip_hotspot_ssid || undefined,
+      hotspot_password: app.config.rotate_ip_hotspot_password || undefined,
     });
     if (res.success) {
       message.success(res.message);

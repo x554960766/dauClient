@@ -747,6 +747,8 @@ async fn maybe_rotate_ip(
         cfg.rotate_ip_serial.as_deref(),
         cfg.rotate_ip_disconnect_wait_s,
         cfg.rotate_ip_reconnect_wait_s,
+        cfg.rotate_ip_hotspot_ssid.as_deref(),
+        cfg.rotate_ip_hotspot_password.as_deref(),
         Some(cancel),
     ).await {
         Ok(res) => {

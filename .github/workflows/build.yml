@@ -64,3 +64,13 @@ jobs:
             下载 `.exe` 安装包运行，将安卓系统镜像 ZIP 放入「下载」文件夹，打开应用点击初始化即可。
           releaseDraft: false
           prerelease: false
+
+      - name: Upload Build Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi
+          if-no-files-found: warn

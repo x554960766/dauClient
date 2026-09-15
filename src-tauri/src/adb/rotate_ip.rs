@@ -86,15 +86,54 @@ pub async fn detect_usb_phones(sdk_dir: &Path) -> Vec<UsbPhoneInfo> {
     phones
 }
 
+/// 确保 Mac 已经连上指定的手机热点，若未连接则强制自动连接（仅在 macOS 上生效，Windows 自动跳过）
+#[cfg(target_os = "macos")]
+async fn ensure_macos_hotspot_connected(ssid_opt: Option<&str>, pwd_opt: Option<&str>) {
+    let route_out = Command::new("route")
+        .args(["-n", "get", "default"])
+        .output()
+        .await;
+    if let Ok(o) = route_out {
+        let s = String::from_utf8_lossy(&o.stdout);
+        // 如果默认网关已经是常见热点网段 (172.20.10.1)，说明连线正常
+        if s.contains("172.20.10.1") {
+            return;
+        }
+    }
+
+    if let Some(ssid) = ssid_opt {
+        let trimmed_ssid = ssid.trim();
+        if !trimmed_ssid.is_empty() {
+            let pwd = pwd_opt.map(|p| p.trim()).unwrap_or("");
+            tracing::info!(ssid = %trimmed_ssid, "检测到尚未连接到配置的手机热点，尝试自动强连...");
+            let mut cmd = Command::new("networksetup");
+            cmd.args(["-setairportnetwork", "en0", trimmed_ssid]);
+            if !pwd.is_empty() {
+                cmd.arg(pwd);
+            }
+            let _ = cmd.output().await;
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn ensure_macos_hotspot_connected(_ssid_opt: Option<&str>, _pwd_opt: Option<&str>) {
+    // Windows 环境下完全不执行任何 Wi-Fi 强连指令，保持原生 USB RNDIS 行为
+}
+
 /// 获取当前电脑出口的公网 IP
 pub async fn get_current_public_ip() -> Option<String> {
     let endpoints = [
+        "http://cip.cc",
         "https://api.ipify.org",
         "http://ifconfig.me/ip",
         "https://icanhazip.com",
     ];
 
+    // 禁用环境代理 (no_proxy)，确保探测的是电脑真实的物理网关/蜂窝出口 IP
     let client = reqwest::Client::builder()
+        .no_proxy()
         .timeout(Duration::from_secs(5))
         .build()
         .ok()?;
@@ -103,11 +142,19 @@ pub async fn get_current_public_ip() -> Option<String> {
         if let Ok(resp) = client.get(ep).send().await {
             if let Ok(text) = resp.text().await {
                 let trimmed = text.trim();
-                if !trimmed.is_empty() && !trimmed.starts_with('<') && trimmed.len() < 50 {
-                    if let Some(first_line) = trimmed.lines().next() {
-                        let ip = first_line.trim().to_string();
-                        if ip.contains('.') || ip.contains(':') {
-                            return Some(ip);
+                if !trimmed.is_empty() && !trimmed.starts_with('<') && trimmed.len() < 120 {
+                    // cip.cc 格式为 "IP : x.x.x.x"
+                    for line in trimmed.lines() {
+                        let line_str = line.trim();
+                        if line_str.starts_with("IP") && line_str.contains(':') {
+                            if let Some(ip_part) = line_str.split(':').nth(1) {
+                                let ip = ip_part.trim().to_string();
+                                if ip.contains('.') || ip.contains(':') {
+                                    return Some(ip);
+                                }
+                            }
+                        } else if !line_str.is_empty() && (line_str.contains('.') || line_str.contains(':')) && line_str.len() < 50 {
+                            return Some(line_str.to_string());
                         }
                     }
                 }
@@ -115,16 +162,26 @@ pub async fn get_current_public_ip() -> Option<String> {
         }
     }
 
-    // 兜底：使用系统 curl
+    // 兜底：使用系统 curl（增加 --noproxy * 避免被本地代理拦截）
     let mut curl_cmd = Command::new("curl");
     #[cfg(target_os = "windows")]
     {
         curl_cmd.creation_flags(0x08000000);
     }
-    if let Ok(out) = curl_cmd.args(["-s", "--max-time", "5", "https://api.ipify.org"]).output().await {
-        let ip = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if !ip.is_empty() && !ip.starts_with('<') && (ip.contains('.') || ip.contains(':')) {
-            return Some(ip);
+    if let Ok(out) = curl_cmd.args(["-s", "--noproxy", "*", "--max-time", "5", "http://cip.cc"]).output().await {
+        let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        for line in raw.lines() {
+            let line_str = line.trim();
+            if line_str.starts_with("IP") && line_str.contains(':') {
+                if let Some(ip_part) = line_str.split(':').nth(1) {
+                    let ip = ip_part.trim().to_string();
+                    if ip.contains('.') || ip.contains(':') {
+                        return Some(ip);
+                    }
+                }
+            } else if !line_str.is_empty() && (line_str.contains('.') || line_str.contains(':')) && line_str.len() < 50 {
+                return Some(line_str.to_string());
+            }
         }
     }
 
@@ -137,8 +194,13 @@ pub async fn rotate_ip_via_adb(
     serial_opt: Option<&str>,
     disconnect_wait_s: u32,
     reconnect_wait_s: u32,
+    hotspot_ssid: Option<&str>,
+    hotspot_password: Option<&str>,
     cancel: Option<&CancellationToken>,
 ) -> Result<RotateIpResult, String> {
+    // 0. Mac 环境先确保 Wi-Fi 处于热点连接状态（Windows 自动空操作）
+    ensure_macos_hotspot_connected(hotspot_ssid, hotspot_password).await;
+
     let bin = resolve_adb_bin(sdk_dir);
 
     // 1. 查找真机
@@ -168,6 +230,9 @@ pub async fn rotate_ip_via_adb(
         cmd.args(args);
         cmd
     };
+
+    // 2.5 核心保障：确保飞行模式只断开蜂窝数据 (cell)，绝对不关闭 Wi-Fi 和热点
+    let _ = run_adb(&["shell", "settings", "put", "global", "airplane_mode_radios", "cell"]).output().await;
 
     // 3. 开启飞行模式（断开连接）
     // 方案 A：Android 11+ connectivity cmd
@@ -204,6 +269,9 @@ pub async fn rotate_ip_via_adb(
         let _ = run_adb(&["shell", "settings", "put", "global", "airplane_mode_on", "0"]).output().await;
         let _ = run_adb(&["shell", "am", "broadcast", "-a", "android.intent.action.AIRPLANE_MODE", "--ez", "state", "false"]).output().await;
     }
+
+    // 4.5 守护热点：若系统异常关停了热点，立刻指令拉起
+    let _ = run_adb(&["shell", "cmd", "connectivity", "start-tethering", "wifi"]).output().await;
 
     // 等待网络重新握手
     for _ in 0..reconnect_wait_s {

@@ -132,12 +132,16 @@ pub async fn test_rotate_ip(
     serial: Option<String>,
     disconnect_wait_s: Option<u32>,
     reconnect_wait_s: Option<u32>,
+    hotspot_ssid: Option<String>,
+    hotspot_password: Option<String>,
 ) -> Result<crate::adb::rotate_ip::RotateIpResult, String> {
     crate::adb::rotate_ip::rotate_ip_via_adb(
         &state.sdk_dir,
         serial.as_deref(),
         disconnect_wait_s.unwrap_or(4),
         reconnect_wait_s.unwrap_or(6),
+        hotspot_ssid.as_deref(),
+        hotspot_password.as_deref(),
         None,
     ).await
 }

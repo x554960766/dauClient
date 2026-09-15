@@ -115,6 +115,12 @@ pub struct EngineConfig {
     /// 飞行模式恢复后等待入网秒数（默认 6s）
     #[serde(default = "default_rotate_ip_reconnect")]
     pub rotate_ip_reconnect_wait_s: u32,
+    /// 手机热点名称（Mac 自动强连用，Windows 可留空）
+    #[serde(default)]
+    pub rotate_ip_hotspot_ssid: Option<String>,
+    /// 手机热点密码（Mac 自动强连用，Windows 可留空）
+    #[serde(default)]
+    pub rotate_ip_hotspot_password: Option<String>,
 }
 
 fn default_rotate_ip_disconnect() -> u32 { 4 }
@@ -157,6 +163,8 @@ impl Default for EngineConfig {
             rotate_ip_serial: None,
             rotate_ip_disconnect_wait_s: 4,
             rotate_ip_reconnect_wait_s: 6,
+            rotate_ip_hotspot_ssid: None,
+            rotate_ip_hotspot_password: None,
         }
     }
 }

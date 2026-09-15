@@ -43,20 +43,25 @@ export const api = {
   resetProfileUsage: () => invoke<void>("reset_profile_usage"),
 
   detectUsbPhones: () => invoke<import("./types").UsbPhoneInfo[]>("detect_usb_phones"),
-  testRotateIp: (params?: { serial?: string; disconnect_wait_s?: number; reconnect_wait_s?: number }) =>
-    invoke<import("./types").RotateIpResult>("test_rotate_ip", params || {}),
+  testRotateIp: (params?: {
+    serial?: string;
+    disconnect_wait_s?: number;
+    reconnect_wait_s?: number;
+    hotspot_ssid?: string;
+    hotspot_password?: string;
+  }) => invoke<import("./types").RotateIpResult>("test_rotate_ip", params || {}),
 };
 
 export function defaultConfig(): EngineConfig {
   return {
     apk_path: "",
     pkg: "",
-    count: 50,
-    concurrency: 4,
+    count: 10,
+    concurrency: 2,
     reset_level: "L3",
     system_image: "",
     device_profile: "pixel_6",
-    dwell_s: 5,
+    dwell_s: 10,
     flush_dwell_s: 5,
     boot_timeout_s: 180,
     emu_mem_mb: 1280,
@@ -70,5 +75,7 @@ export function defaultConfig(): EngineConfig {
     rotate_ip_serial: null,
     rotate_ip_disconnect_wait_s: 4,
     rotate_ip_reconnect_wait_s: 6,
+    rotate_ip_hotspot_ssid: "P70",
+    rotate_ip_hotspot_password: "123456789",
   };
 }

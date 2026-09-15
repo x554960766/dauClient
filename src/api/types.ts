@@ -39,6 +39,8 @@ export interface EngineConfig {
   rotate_ip_serial?: string | null;
   rotate_ip_disconnect_wait_s?: number;
   rotate_ip_reconnect_wait_s?: number;
+  rotate_ip_hotspot_ssid?: string | null;
+  rotate_ip_hotspot_password?: string | null;
 }
 
 export interface UsbPhoneInfo {

@@ -7,6 +7,7 @@ use crate::proxy::{CountingProxy, ProxyStats};
 use crate::state::SharedState;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
@@ -641,7 +642,7 @@ pub async fn pilot_reset_trial(
         };
 
         // 用 match 而非 ? —— 确保失败路径也能拿到 user 做清理
-        let app_result = run_app(&ctx, port, user, 0).await;
+        let app_result = run_app(&ctx, &serial, port, user, 0).await;
 
         let after = match state.proxy_stats.lock().await.as_ref() {
             Some(s) => s.read().await.clone(),
@@ -738,7 +739,7 @@ async fn maybe_rotate_ip(
 
     emit_state(app, "batch://ip_status", serde_json::json!({
         "rotating": true,
-        "message": "当前批次完成，正在通过手机 USB 飞行模式切换 IP...",
+        "message": "正在后台通过手机 USB 飞行模式平滑切换 IP...",
         "ip": null,
     }));
 
@@ -780,6 +781,103 @@ async fn wait_ip_ready(rx_opt: Option<tokio::sync::watch::Receiver<bool>>) {
     }
 }
 
+/// 随机抽取在 [min, max] 台之间换 IP 的间隔（默认 60~100 台随机抽取）
+fn pick_rotate_interval(min: u32, max: u32, seed: u64) -> u32 {
+    let min = min.max(1);
+    let max = max.max(min);
+    if min == max {
+        return min;
+    }
+    let range = (max - min + 1) as u64;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let r = (nanos.wrapping_add(seed.wrapping_mul(2654435761))) % range;
+    min + (r as u32)
+}
+
+static TIME_WINDOW_WAITING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 检查并在必要时挂起等待直到进入设定的时间窗口内
+pub async fn wait_for_time_window(
+    app: &AppHandle,
+    cfg: &EngineConfig,
+    cancel: &CancellationToken,
+) -> bool {
+    if !cfg.time_window_enabled {
+        return true;
+    }
+    if crate::engine::is_within_time_window(cfg) {
+        if TIME_WINDOW_WAITING.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            tracing::info!("[Batch] 已进入设定的放量时间窗口，恢复调度执行");
+            emit_state(
+                app,
+                "batch://time_window_status",
+                serde_json::json!({
+                    "waiting": false,
+                    "start": cfg.time_window_start,
+                    "end": cfg.time_window_end,
+                    "message": "已进入时间范围，恢复放量执行",
+                }),
+            );
+        }
+        return true;
+    }
+
+    // 处于时间窗口之外
+    if !TIME_WINDOW_WAITING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        tracing::info!(
+            start = %cfg.time_window_start,
+            end = %cfg.time_window_end,
+            "[Batch] 当前北京时间不在设定的放量窗口内，挂起等待中..."
+        );
+        emit_state(
+            app,
+            "batch://time_window_status",
+            serde_json::json!({
+                "waiting": true,
+                "start": cfg.time_window_start,
+                "end": cfg.time_window_end,
+                "message": format!(
+                    "当前北京时间不在设定时间范围 [{} - {}] 内，已暂停调度挂起等待中...",
+                    cfg.time_window_start, cfg.time_window_end
+                ),
+            }),
+        );
+    }
+
+    while !crate::engine::is_within_time_window(cfg) {
+        if cancel.is_cancelled() {
+            TIME_WINDOW_WAITING.store(false, std::sync::atomic::Ordering::SeqCst);
+            return false;
+        }
+
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                TIME_WINDOW_WAITING.store(false, std::sync::atomic::Ordering::SeqCst);
+                return false;
+            }
+            _ = tokio::time::sleep(Duration::from_secs(3)) => {}
+        }
+    }
+
+    if TIME_WINDOW_WAITING.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        tracing::info!("[Batch] 已进入设定的放量时间窗口，恢复调度执行");
+        emit_state(
+            app,
+            "batch://time_window_status",
+            serde_json::json!({
+                "waiting": false,
+                "start": cfg.time_window_start,
+                "end": cfg.time_window_end,
+                "message": "已进入时间范围，恢复放量执行",
+            }),
+        );
+    }
+    true
+}
+
 pub async fn batch_run(
     app: AppHandle,
     state: SharedState,
@@ -813,6 +911,23 @@ pub async fn batch_run(
     let cfg = Arc::new(cfg);
     let started_at = beijing_now();
 
+    // 检查时间窗口限制（若启动时不在时间窗口内，立即平滑挂起等待）
+    if !wait_for_time_window(&app, &cfg, &cancel).await {
+        return Ok(crate::report::RunResult {
+            run_id: run_id.clone(),
+            api_level: extract_api_level(&cfg.system_image),
+            reset_level: cfg.reset_level.as_str().into(),
+            target: cfg.count,
+            ok: 0,
+            fail: 0,
+            timezone_note: "任务启动时处于设定时间范围外，已在等待期间手动停止".into(),
+            started_at,
+            finished_at: beijing_now(),
+            devices: Vec::new(),
+            compliance_ack: true,
+        });
+    }
+
     if cfg.auto_rotate_ip {
         let app_clone = app.clone();
         tokio::spawn(async move {
@@ -845,80 +960,108 @@ pub async fn batch_run(
         let today = crate::engine::profile_stack::ProfileStackStore::beijing_now_info().0;
         let total_count = cfg.count;
         let concurrency = cfg.concurrency.min(total_count).min(8);
+        let task_counter = Arc::new(AtomicU32::new(1));
+        let completed_counter = Arc::new(AtomicU32::new(0));
+        let net_lock = Arc::new(tokio::sync::RwLock::new(()));
+
+        // 随机抽取第一次换 IP 的间隔（默认 60~100 台之间随机）
+        let initial_interval = pick_rotate_interval(cfg.rotate_ip_interval_min, cfg.rotate_ip_interval_max, 0);
+        let next_rotate_target = Arc::new(AtomicU32::new(initial_interval));
+        tracing::info!(
+            total_count,
+            concurrency,
+            interval_min = cfg.rotate_ip_interval_min,
+            interval_max = cfg.rotate_ip_interval_max,
+            first_target = initial_interval,
+            "⚡ [流水线 Worker Pool 启动] 每累计完成 60~100 台随机后台平滑换 IP，各槽位独立流水线零空等"
+        );
+
         let mut handles = Vec::new();
-        let mut current_ip_rx: Option<tokio::sync::watch::Receiver<bool>> = None;
-
-        for device_idx in 1..=total_count {
-            if cancel.is_cancelled() {
-                break;
-            }
-            let slot = (device_idx - 1) % concurrency;
-
-            let roll = crate::engine::pseudo_random_f64(device_idx as u64);
-            let force_l3 = roll < cfg.l3_probability;
-
-            let mut selected_profile = None;
-            if !force_l3 {
-                let mut stack_mut = crate::engine::profile_stack::ProfileStackStore::load(&state.stack_file).await;
-                if let Some(prof) = stack_mut.pop_available_for_today(&today, cfg.stack_read_mode) {
-                    let _ = stack_mut.save(&state.stack_file).await;
-                    selected_profile = Some(prof);
-                } else {
-                    tracing::info!(device_idx, reset_level = %cfg.reset_level.as_str(), "堆栈中无可用的未用档案（全用或为空），执行设备重置");
-                }
-            }
-
+        for slot in 0..concurrency {
             let app_w = app.clone();
             let cfg_w = cfg.clone();
-            let results = results.clone();
+            let results_w = results.clone();
             let cancel_w = cancel.clone();
             let sdk_w = sdk.clone();
             let adb_port = state.adb_server_port;
             let proxy_addr_s = if cfg.use_proxy { Some(proxy_addr) } else { None };
             let registry_s = registry.clone();
             let stack_file_s = state.stack_file.clone();
-            let ip_rx = current_ip_rx.clone();
+            let task_counter_w = task_counter.clone();
+            let completed_counter_w = completed_counter.clone();
+            let next_rotate_target_w = next_rotate_target.clone();
+            let net_lock_w = net_lock.clone();
+            let today_w = today.clone();
 
-            if let Some(prof) = selected_profile {
-                handles.push(tokio::spawn(async move {
-                    profile_replay_worker(
-                        app_w, sdk_w, adb_port, slot, device_idx, cfg_w,
-                        results, registry_s, prof, proxy_addr_s, cancel_w,
-                        ip_rx,
-                    ).await;
-                }));
-            } else {
-                handles.push(tokio::spawn(async move {
-                    run_single_l3_and_push_stack(
-                        app_w, sdk_w, adb_port, slot, device_idx, cfg_w,
-                        results, registry_s, proxy_addr_s, stack_file_s, cancel_w,
-                        ip_rx,
-                    ).await;
-                }));
-            }
-
-            tokio::time::sleep(Duration::from_secs(3)).await;
-
-            if handles.len() >= concurrency as usize {
-                // 无论个别设备执行成功还是失败，均安全等待当前批次全部完成
-                for h in handles.drain(..) {
-                    let _ = h.await;
+            handles.push(tokio::spawn(async move {
+                // 每个槽位错峰 2s 启动，避免并发冷启动时的 CPU/IO 峰值冲击
+                if slot > 0 {
+                    tokio::time::sleep(Duration::from_secs(slot as u64 * 2)).await;
                 }
-                // 当前批次完成！若后续还有设备需要运行，立即在后台异步启动换 IP！
-                // 下一批新设备在下一轮循环中立即启动冷启动，冷启动与手机飞行模式换 IP 完全并行！
-                if device_idx < total_count && !cancel.is_cancelled() && cfg.auto_rotate_ip {
-                    let (tx, rx) = tokio::sync::watch::channel(false);
-                    current_ip_rx = Some(rx);
-                    let app_c = app.clone();
-                    let sdk_c = sdk.clone();
-                    let cfg_c = cfg.clone();
-                    let cancel_c = cancel.clone();
-                    tokio::spawn(async move {
-                        maybe_rotate_ip(&app_c, &sdk_c, &cfg_c, &cancel_c).await;
-                        let _ = tx.send(true);
-                    });
+
+                loop {
+                    if cancel_w.is_cancelled() {
+                        break;
+                    }
+                    // 执行前检查时间窗口：若离开时间范围，在此平滑挂起等待
+                    if !wait_for_time_window(&app_w, &cfg_w, &cancel_w).await {
+                        break;
+                    }
+                    let device_idx = task_counter_w.fetch_add(1, Ordering::SeqCst);
+                    if device_idx > total_count {
+                        break;
+                    }
+
+                    let roll = crate::engine::pseudo_random_f64(device_idx as u64);
+                    let force_l3 = roll < cfg_w.l3_probability;
+
+                    let mut selected_profile = None;
+                    if !force_l3 {
+                        let mut stack_mut = crate::engine::profile_stack::ProfileStackStore::load(&stack_file_s).await;
+                        if let Some(prof) = stack_mut.pop_available_for_today(&today_w, cfg_w.stack_read_mode) {
+                            let _ = stack_mut.save(&stack_file_s).await;
+                            selected_profile = Some(prof);
+                        } else {
+                            tracing::info!(device_idx, reset_level = %cfg_w.reset_level.as_str(), "堆栈中无可用的未用档案（全用或为空），执行设备重置");
+                        }
+                    }
+
+                    if let Some(prof) = selected_profile {
+                        profile_replay_worker(
+                            app_w.clone(), sdk_w.clone(), adb_port, slot, device_idx, cfg_w.clone(),
+                            results_w.clone(), registry_s.clone(), prof, proxy_addr_s, cancel_w.clone(),
+                            Some(net_lock_w.clone()),
+                        ).await;
+                    } else {
+                        run_single_l3_and_push_stack(
+                            app_w.clone(), sdk_w.clone(), adb_port, slot, device_idx, cfg_w.clone(),
+                            results_w.clone(), registry_s.clone(), proxy_addr_s, stack_file_s.clone(), cancel_w.clone(),
+                            Some(net_lock_w.clone()),
+                        ).await;
+                    }
+
+                    // 累计完成计数与后台平滑换 IP
+                    let finished = completed_counter_w.fetch_add(1, Ordering::SeqCst) + 1;
+                    let target = next_rotate_target_w.load(Ordering::SeqCst);
+                    if cfg_w.auto_rotate_ip && finished >= target && finished < total_count && !cancel_w.is_cancelled() {
+                        let next_interval = pick_rotate_interval(cfg_w.rotate_ip_interval_min, cfg_w.rotate_ip_interval_max, finished as u64);
+                        next_rotate_target_w.store(finished + next_interval, Ordering::SeqCst);
+
+                        let app_c = app_w.clone();
+                        let sdk_c = sdk_w.clone();
+                        let cfg_c = cfg_w.clone();
+                        let cancel_c = cancel_w.clone();
+                        let net_lock_c = net_lock_w.clone();
+                        tokio::spawn(async move {
+                            tracing::info!(finished, next_target = finished + next_interval, "🚀 [后台平滑换 IP] 累计完成 {} 台，等待写锁并在后台通过手机 USB 飞行模式更换出口 IP...", finished);
+                            // 获取写锁：等待当前少量正在进行友盟数据打点的 run_app 退出后断开重拨
+                            // 此时其它槽位冷启动与准备工作完全不受阻碍，实现完全平滑过渡
+                            let _write_guard = net_lock_c.write().await;
+                            maybe_rotate_ip(&app_c, &sdk_c, &cfg_c, &cancel_c).await;
+                        });
+                    }
                 }
-            }
+            }));
         }
 
         for h in handles {
@@ -953,6 +1096,7 @@ pub async fn batch_run(
         emit_state(&app, "batch://progress", serde_json::json!({
             "ok": ok, "fail": fail, "running": 0, "queued": 0,
             "done": true, "umeng_hits": stats.umeng_hits,
+            "blocked_hits": stats.blocked_connects,
         }));
 
         return Ok(result);
@@ -978,9 +1122,11 @@ pub async fn batch_run(
         let to_replay: Vec<_> = profiles.into_iter().take(replay_count as usize).collect();
         let concurrency_p = cfg.concurrency.min(to_replay.len() as u32).min(8);
 
-        let mut current_ip_rx: Option<tokio::sync::watch::Receiver<bool>> = None;
         if !to_replay.is_empty() {
             for (batch_idx, chunk) in to_replay.chunks(concurrency_p as usize).enumerate() {
+                if !wait_for_time_window(&app, &cfg, &cancel).await {
+                    break;
+                }
                 for (i, prof) in chunk.iter().enumerate() {
                     let app_w = app.clone();
                     let cfg_w = cfg.clone();
@@ -993,13 +1139,12 @@ pub async fn batch_run(
                     let slot = i as u32;
                     let proxy_addr_p = if cfg.use_proxy { Some(proxy_addr) } else { None };
                     let registry_p = registry.clone();
-                    let ip_rx = current_ip_rx.clone();
 
                     handles.push(tokio::spawn(async move {
                         profile_replay_worker(
                             app_w, sdk_w, adb_port, slot, device_index, cfg_w,
                             results, registry_p, prof, proxy_addr_p, cancel_w,
-                            ip_rx,
+                            None,
                         ).await;
                     }));
                     tokio::time::sleep(Duration::from_secs(3)).await;
@@ -1008,15 +1153,12 @@ pub async fn batch_run(
                     let _ = h.await;
                 }
                 if ((batch_idx + 1) * concurrency_p as usize) < to_replay.len() && !cancel.is_cancelled() && cfg.auto_rotate_ip {
-                    let (tx, rx) = tokio::sync::watch::channel(false);
-                    current_ip_rx = Some(rx);
                     let app_c = app.clone();
                     let sdk_c = sdk.clone();
                     let cfg_c = cfg.clone();
                     let cancel_c = cancel.clone();
                     tokio::spawn(async move {
                         maybe_rotate_ip(&app_c, &sdk_c, &cfg_c, &cancel_c).await;
-                        let _ = tx.send(true);
                     });
                 }
             }
@@ -1040,6 +1182,9 @@ pub async fn batch_run(
 
         // 留存设备按批次串行调度（每批 concurrency_r 台并发）
         for (batch_idx, chunk) in pool_devices.chunks(concurrency_r as usize).enumerate() {
+            if !wait_for_time_window(&app, &cfg, &cancel).await {
+                break;
+            }
             for (i, pool_dev) in chunk.iter().enumerate() {
                 let app_w = app.clone();
                 let cfg_w = cfg.clone();
@@ -1084,31 +1229,35 @@ pub async fn batch_run(
 
     // ---- Phase B：新增设备（一次性 AVD，现有 L3 流程）----
     if new_count > 0 {
-        // 更新 count 以适配 slot_worker 的分片逻辑
-        let mut new_cfg = (*cfg).clone();
-        new_cfg.count = new_count;
-        let new_cfg = Arc::new(new_cfg);
+        if !wait_for_time_window(&app, &cfg, &cancel).await {
+            // 已在等待时间窗口期间取消
+        } else {
+            // 更新 count 以适配 slot_worker 的分片逻辑
+            let mut new_cfg = (*cfg).clone();
+            new_cfg.count = new_count;
+            let new_cfg = Arc::new(new_cfg);
 
-        let concurrency_n = new_cfg.concurrency.min(new_count).min(8);
+            let concurrency_n = new_cfg.concurrency.min(new_count).min(8);
 
-        for slot in 0..concurrency_n {
-            let app = app.clone();
-            let cfg = new_cfg.clone();
-            let results = results.clone();
-            let registry = registry.clone();
-            let cancel = cancel.clone();
-            let sdk = sdk.clone();
-            let adb_port = state.adb_server_port;
-            let run_dir_slot = run_dir.clone();
+            for slot in 0..concurrency_n {
+                let app = app.clone();
+                let cfg = new_cfg.clone();
+                let results = results.clone();
+                let registry = registry.clone();
+                let cancel = cancel.clone();
+                let sdk = sdk.clone();
+                let adb_port = state.adb_server_port;
+                let run_dir_slot = run_dir.clone();
 
-            handles.push(tokio::spawn(async move {
-                slot_worker(app, sdk, adb_port, slot, cfg, results, registry, proxy_addr, cancel, run_dir_slot).await;
-            }));
-            tokio::time::sleep(Duration::from_secs(3)).await;
-        }
+                handles.push(tokio::spawn(async move {
+                    slot_worker(app, sdk, adb_port, slot, cfg, results, registry, proxy_addr, cancel, run_dir_slot).await;
+                }));
+                tokio::time::sleep(Duration::from_secs(3)).await;
+            }
 
-        for h in handles {
-            let _ = h.await;
+            for h in handles {
+                let _ = h.await;
+            }
         }
     }
 
@@ -1118,6 +1267,20 @@ pub async fn batch_run(
     registry.cleanup(&adb2, &avdm2).await;
     let stats = proxy.snapshot().await;
     proxy.stop();
+
+    tracing::info!(
+        total_connects = stats.total_connects,
+        umeng_hits = stats.umeng_hits,
+        umeng_bytes = %crate::proxy::format_bytes(stats.umeng_bytes),
+        blocked_connects = stats.blocked_connects,
+        circuit_broken = stats.circuit_broken_connects,
+        total_bytes = %crate::proxy::format_bytes(stats.total_bytes),
+        "📊 [流量审计总结] 批次完成，累计放行网络流量: {} (友盟打点流量: {})，成功阻断非必要连接: {} 次，熔断大流量连接: {} 次",
+        crate::proxy::format_bytes(stats.total_bytes),
+        crate::proxy::format_bytes(stats.umeng_bytes),
+        stats.blocked_connects,
+        stats.circuit_broken_connects
+    );
 
     let devices = results.lock().await.clone();
     let ok = devices.iter().filter(|d| d.status == "ok").count() as u32;
@@ -1141,6 +1304,9 @@ pub async fn batch_run(
     emit_state(&app, "batch://progress", serde_json::json!({
         "ok": ok, "fail": fail, "running": 0, "queued": 0,
         "done": true, "umeng_hits": stats.umeng_hits,
+        "blocked_hits": stats.blocked_connects,
+        "total_traffic": crate::proxy::format_bytes(stats.total_bytes),
+        "umeng_traffic": crate::proxy::format_bytes(stats.umeng_bytes),
     }));
 
     Ok(result)
@@ -1161,7 +1327,7 @@ async fn profile_replay_worker(
     prof: crate::engine::profile_archive::IdentityProfile,
     proxy_addr: Option<std::net::SocketAddr>,
     cancel: CancellationToken,
-    ip_ready_rx: Option<tokio::sync::watch::Receiver<bool>>,
+    net_lock: Option<Arc<tokio::sync::RwLock<()>>>,
 ) {
     let adb = Adb::new(&sdk, adb_port);
     let avdm = AvdManager::new(&sdk, adb.env().clone());
@@ -1220,9 +1386,6 @@ async fn profile_replay_worker(
     // 关键步骤：覆盖真机设备型号（修改 build.prop 并重载），确保友盟统计获取到真实的档案机型而非 sdk_gphone
     crate::uiautomation::prepare::apply_device_spoofing(&adb, &emulator, &avd, port, &opts).await;
 
-    // 关键优化：冷启动完成，等待换 IP 在后台就绪（二者完全并行，几乎零额外等待）
-    wait_ip_ready(ip_ready_rx).await;
-
     if adb.wait_net(&serial).await.is_err()
         || adb.install(&serial, Path::new(&cfg.apk_path), None).await.is_err()
     {
@@ -1263,7 +1426,14 @@ async fn profile_replay_worker(
         ..Default::default()
     };
 
-    match run_app(&ctx, port, None, device_index).await {
+    // 后台平滑换 IP 读锁保护：若后台正在执行 USB 飞行模式重拨，等待换好获取新 IP 后再进行友盟上报
+    let _net_guard = if let Some(ref lock) = net_lock {
+        Some(lock.read().await)
+    } else {
+        None
+    };
+
+    match run_app(&ctx, &serial, port, None, device_index).await {
         Ok(outcome) => {
             result.prepare = outcome.prepare;
             result.onboarding = outcome.onboarding;
@@ -1310,7 +1480,7 @@ async fn run_single_l3_and_push_stack(
     proxy_addr: Option<std::net::SocketAddr>,
     stack_file: std::path::PathBuf,
     cancel: CancellationToken,
-    ip_ready_rx: Option<tokio::sync::watch::Receiver<bool>>,
+    net_lock: Option<Arc<tokio::sync::RwLock<()>>>,
 ) {
     let adb = Adb::new(&sdk, adb_port);
     let avdm = AvdManager::new(&sdk, adb.env().clone());
@@ -1353,28 +1523,34 @@ async fn run_single_l3_and_push_stack(
         registry.register(&avd, port).await;
     }
 
-    // 同一槽位 AVD 复用：机型按 AVD 名固定，首次 L3 完整伪装后 build.prop 持久，
-    // 后续 L3 wipe 重启命中 spoofing 早退（省 root/remount/重启）→ 单启动。
-    // info 与 props 必须来自同一确定性 profile，保证型号显示/档案与实际伪装一致。
-    let info = crate::avd::device_info_for_avd(&avd);
-    let opts = BootOpts {
-        wipe: is_l3, // 仅 L3 恢复出厂才执行 wipe-data
-        mem_mb: Some(cfg.emu_mem_mb),
-        http_proxy: proxy_addr,
-        max_users: cfg.max_users,
-        props: crate::avd::device_props_from_info(&info),
-    };
+    // 关键优化：每台设备独立随机分配独一无二的真机机型配置（从 29 种真实设备库轮换，确保每台设备信息绝对不重复）
+    let info = crate::avd::pick_unique_device_info(device_index, slot);
+    tracing::info!(
+        device_index,
+        slot,
+        brand = %info.brand,
+        model = %info.model,
+        "📱 为设备 #{} 分配全新独立真机指纹: {} {}",
+        device_index,
+        info.brand,
+        info.model
+    );
 
-    if is_l25 && is_running {
-        tracing::info!(device_index, serial = %serial, "⚡ [L2.5 多用户] 复用当前槽位已开机模拟器，无需重新冷启动！");
-    } else if is_l3 && is_running {
-        // 关键优化：如果当前槽位模拟器在线且已完成指纹注入，直接调用 reset_device_in_place，
-        // 彻底清理前序应用数据与 SSAID，热重启 Zygote 生成全新合法 ANDROID_ID，跳过冷启动与二次改写！
-        tracing::info!(device_index, serial = %serial, "⚡ [L3 新增] 复用当前槽位已开机且已注入指纹的模拟器，执行单启动极速重置！");
-        if let Err(e) = crate::uiautomation::prepare::reset_device_in_place(&adb, &serial, &cfg.pkg).await {
-            tracing::warn!("reset_device_in_place 遇到警告 ({})，继续运行", e);
-        }
-    } else {
+    // L3 恢复出厂模式：必须彻底关闭旧模拟器进程，确保内核参数 ro.product.model / 硬件指纹完全出厂重塑，绝不复用旧系统！
+    if is_l3 && is_running {
+        let _ = adb.emu_kill(&serial).await;
+        let _ = crate::avd::wait_port_free(port, 4).await;
+    }
+
+    if !is_running || is_l3 {
+        let opts = BootOpts {
+            wipe: is_l3, // L3 必须执行 wipe-data 彻底清除前序设备数据并重新生成唯一 SSAID
+            mem_mb: Some(cfg.emu_mem_mb),
+            http_proxy: proxy_addr,
+            max_users: cfg.max_users,
+            props: crate::avd::device_props_from_info(&info),
+        };
+
         if emulator.boot(&avd, port, &opts).await.is_err()
             || adb.wait_boot(&serial, Duration::from_secs(cfg.boot_timeout_s as u64)).await.is_err()
         {
@@ -1388,13 +1564,13 @@ async fn run_single_l3_and_push_stack(
             let _ = adb.emu_kill(&serial).await;
             return;
         }
-        if is_l3 {
-            crate::uiautomation::prepare::apply_device_spoofing(&adb, &emulator, &avd, port, &opts).await;
-        }
-    }
 
-    // 关键优化：冷启动与指纹注入完成，等待换 IP 在后台就绪（二者完全并行，大幅减少总执行耗时）
-    wait_ip_ready(ip_ready_rx).await;
+        if is_l3 {
+            crate::uiautomation::prepare::sync_display_resolution_with_profile(&adb, &serial, Some(&info)).await;
+        }
+    } else {
+        tracing::info!(device_index, serial = %serial, "⚡ [L2.5 多用户] 复用当前槽位已开机模拟器，无需重新冷启动！");
+    }
 
     if adb.wait_net(&serial).await.is_err() {
         push_result(&app, &results, DeviceResult {
@@ -1471,7 +1647,14 @@ async fn run_single_l3_and_push_stack(
         ..Default::default()
     };
 
-    match run_app(&ctx, port, user_id, device_index).await {
+    // 后台平滑换 IP 读锁保护：若后台正在执行 USB 飞行模式重拨，等待换好获取新 IP 后再进行友盟上报
+    let _net_guard = if let Some(ref lock) = net_lock {
+        Some(lock.read().await)
+    } else {
+        None
+    };
+
+    match run_app(&ctx, &serial, port, user_id, device_index).await {
         Ok(outcome) => {
             result.prepare = outcome.prepare;
             result.onboarding = outcome.onboarding;
@@ -1520,8 +1703,12 @@ async fn run_single_l3_and_push_stack(
         }
     }
 
-    // L2.5 多用户模式与 L3 模式下保持模拟器开机，供同槽位后续设备极速复用（单启动 ~50s）
-    // 批次完成或取消停止时由 registry.cleanup 统一进行安全清理
+    // L3 模式下每台必须彻底关闭并释放，确保下一台设备 cold boot 携带独立全新硬件指纹与 wipe 后的 SSAID
+    if is_l3 {
+        let _ = adb.emu_kill(&serial).await;
+        let _ = crate::avd::wait_port_free(port, 4).await;
+    }
+
     push_result(&app, &results, result).await;
 }
 
@@ -1647,7 +1834,7 @@ async fn retention_worker(
         ..Default::default()
     };
 
-    match run_app(&ctx, port, None, device_index).await {
+    match run_app(&ctx, &serial, port, None, device_index).await {
         Ok(outcome) => {
             result.prepare = outcome.prepare;
             result.onboarding = outcome.onboarding;

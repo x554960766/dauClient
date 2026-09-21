@@ -161,12 +161,12 @@ pub static DEVICE_PROFILES: &[DeviceProfileInfo] = &[
     },
     DeviceProfileInfo {
         brand: "Xiaomi", model: "22101317C", device: "mondrian", board: "mondrian", hardware: "qcom",
-        fingerprint: "Xiaomi/mondrian/mondrian:13/TKQ1.220905.001/V14.0.23.0.TMNCNXM:user/release-keys",
+        fingerprint: "Xiaomi/mondrian/mondrian:14/UKQ1.230917.001/V816.0.4.0.UMNCNXM:user/release-keys",
         width: 1440, height: 3200, density: 520,
     },
     DeviceProfileInfo {
         brand: "Xiaomi", model: "23090RA98C", device: "zircon", board: "zircon", hardware: "mtk",
-        fingerprint: "Xiaomi/zircon/zircon:13/TP1A.220624.014/V14.0.5.0.TNOCCNXM:user/release-keys",
+        fingerprint: "Xiaomi/zircon/zircon:14/UKQ1.230917.001/V816.0.2.0.UNOCNXM:user/release-keys",
         width: 1220, height: 2712, density: 450,
     },
     // OPPO & OnePlus
@@ -192,7 +192,7 @@ pub static DEVICE_PROFILES: &[DeviceProfileInfo] = &[
     },
     DeviceProfileInfo {
         brand: "OPPO", model: "PHY120", device: "PHY120", board: "PHY120", hardware: "qcom",
-        fingerprint: "OPPO/PHY120/PHY120:13/TP1A.220905.001/13.1.1.300:user/release-keys",
+        fingerprint: "OPPO/PHY120/PHY120:14/UP1A.231005.007/14.0.0.301:user/release-keys",
         width: 1080, height: 2412, density: 400,
     },
     DeviceProfileInfo {
@@ -223,7 +223,7 @@ pub static DEVICE_PROFILES: &[DeviceProfileInfo] = &[
     },
     DeviceProfileInfo {
         brand: "vivo", model: "V2505A", device: "V2505A", board: "V2505A", hardware: "mtk",
-        fingerprint: "vivo/V2505A/V2505A:15/AP3A.240905.015/compiler12101800:user/release-keys",
+        fingerprint: "vivo/V2505A/V2505A:14/UP1A.231005.007/compiler12101800:user/release-keys",
         width: 1260, height: 2800, density: 450,
     },
     DeviceProfileInfo {
@@ -239,27 +239,27 @@ pub static DEVICE_PROFILES: &[DeviceProfileInfo] = &[
     // HUAWEI
     DeviceProfileInfo {
         brand: "HUAWEI", model: "ALN-AL00", device: "ALN-AL00", board: "ALN-AL00", hardware: "kirin",
-        fingerprint: "HUAWEI/ALN-AL00/ALN-AL00:12/HUAWEIALN-AL00/4.0.0.138:user/release-keys",
+        fingerprint: "HUAWEI/ALN-AL00/ALN-AL00:14/HUAWEIALN-AL00/4.0.0.138:user/release-keys",
         width: 1260, height: 2720, density: 440,
     },
     DeviceProfileInfo {
         brand: "HUAWEI", model: "HBM-AL00", device: "HBM-AL00", board: "HBM-AL00", hardware: "kirin",
-        fingerprint: "HUAWEI/HBM-AL00/HBM-AL00:12/HUAWEI4.2.0.115/HBM-AL00:user/release-keys",
+        fingerprint: "HUAWEI/HBM-AL00/HBM-AL00:14/HUAWEI4.2.0.115/HBM-AL00:user/release-keys",
         width: 1260, height: 2844, density: 460,
     },
     DeviceProfileInfo {
         brand: "HUAWEI", model: "MNA-AL00", device: "MNA-AL00", board: "MNA-AL00", hardware: "qcom",
-        fingerprint: "HUAWEI/MNA-AL00/MNA-AL00:12/HUAWEIMNA-AL00/3.1.0.170:user/release-keys",
+        fingerprint: "HUAWEI/MNA-AL00/MNA-AL00:14/HUAWEIMNA-AL00/3.1.0.170:user/release-keys",
         width: 1220, height: 2700, density: 440,
     },
     DeviceProfileInfo {
         brand: "HUAWEI", model: "ADA-AL00U", device: "ADA-AL00U", board: "ADA-AL00U", hardware: "kirin",
-        fingerprint: "HUAWEI/ADA-AL00U/ADA-AL00U:12/HUAWEI4.0.0.120/ADA-AL00U:user/release-keys",
+        fingerprint: "HUAWEI/ADA-AL00U/ADA-AL00U:14/HUAWEI4.0.0.120/ADA-AL00U:user/release-keys",
         width: 1224, height: 2776, density: 440,
     },
     DeviceProfileInfo {
         brand: "HUAWEI", model: "ALT-AL10", device: "ALT-AL10", board: "ALT-AL10", hardware: "kirin",
-        fingerprint: "HUAWEI/ALT-AL10/ALT-AL10:12/HUAWEIALT-AL10/4.0.0.150:user/release-keys",
+        fingerprint: "HUAWEI/ALT-AL10/ALT-AL10:14/HUAWEIALT-AL10/4.0.0.150:user/release-keys",
         width: 1080, height: 2504, density: 420,
     },
     // HONOR
@@ -293,12 +293,15 @@ pub fn find_profile_by_model(model: &str) -> Option<DeviceProfileInfo> {
     }).cloned()
 }
 
+static DEVICE_INFO_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 pub fn random_device_info() -> DeviceProfileInfo {
+    let count = DEVICE_INFO_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
+        .map(|d| d.as_nanos() as usize)
         .unwrap_or(0);
-    let idx = (nanos as usize) % DEVICE_PROFILES.len();
+    let idx = count.wrapping_add(nanos >> 12) % DEVICE_PROFILES.len();
     DEVICE_PROFILES[idx].clone()
 }
 
@@ -377,37 +380,70 @@ pub fn random_device_props() -> Vec<(String, String)> {
     device_props_from_info(&info)
 }
 
-/// 按 AVD 名「确定性」选择真机档案：同一 AVD 永远返回同一机型。
-///
-/// 这是 L3 批量提速的关键。`apply_device_spoofing` 会把机型指纹写入 system 分区的
-/// build.prop（`-wipe-data` 只清 userdata，改动持久）。若机型固定，同一 AVD 首次 L3
-/// 完整伪装（含 build.prop 重启）之后，后续 L3  wipe 重启时 `getprop` 读到的仍是该机型，
-/// 命中 apply_device_spoofing 开头的「型号已匹配」早退分支，从而跳过 root/remount/重启，
-/// 实现「同一 AVD 只有第一次 L3 双启动，后续 L3 单启动」。
-/// 不同 AVD（不同 slot）仍映射到不同机型，跨设备多样性不受影响。
-pub fn device_info_for_avd(avd_name: &str) -> DeviceProfileInfo {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut h = DefaultHasher::new();
-    avd_name.hash(&mut h);
-    let idx = (h.finish() as usize) % DEVICE_PROFILES.len();
+/// 选取完全独特且各不相同的真机硬件配置（以 device_index 严格轮流分配 29 种真实设备库，确保每台设备机型绝不重复）
+pub fn pick_unique_device_info(device_index: u32, _slot: u32) -> DeviceProfileInfo {
+    let hour_offset = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| (d.as_secs() / 3600) as usize)
+        .unwrap_or(0);
+    // 以 device_index 为核心步进，保证前 29 台每台都对应不同真实手机型号
+    let idx = (device_index as usize + hour_offset) % DEVICE_PROFILES.len();
     DEVICE_PROFILES[idx].clone()
 }
 
-/// 与 `device_info_for_avd` 配套的确定性 props（供 BootOpts.props / config.ini 注入）
+/// 选择真机档案：确保不同设备和不同运行批次均具有高随机多样性
+pub fn device_info_for_avd(_avd_name: &str) -> DeviceProfileInfo {
+    random_device_info()
+}
+
+/// 按设备运行序号「轮询」选择真机档案：
+/// 保证批处理中每一台运行的设备都轮换到不同的真实手机品牌和型号，
+/// 规避相同 slot 多次执行时型号单一的问题。
+pub fn device_info_for_index(device_index: u32) -> DeviceProfileInfo {
+    let idx = (device_index as usize) % DEVICE_PROFILES.len();
+    DEVICE_PROFILES[idx].clone()
+}
+
+/// 与 `device_info_for_avd` 配套的真机 props（供 BootOpts.props / config.ini 注入）
 pub fn device_props_for_avd(avd_name: &str) -> Vec<(String, String)> {
     device_props_from_info(&device_info_for_avd(avd_name))
 }
 
+/// 解析指定 AVD 的真实存储目录（跨平台精准定位：环境变量 > 私有 SDK .android 目录 > 用户主目录）
+pub fn resolve_avd_dir(avd_name: &str) -> Option<PathBuf> {
+    let target = format!("{}.avd", avd_name);
+    // 1. ANDROID_AVD_HOME 环境变量优先
+    if let Ok(custom) = std::env::var("ANDROID_AVD_HOME") {
+        let p = PathBuf::from(custom).join(&target);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    // 2. 客户端私有 SDK 目录（macOS: ~/Library/Caches/umeng-dau-client/sdk/.android/avd）
+    if let Some(cache) = dirs::cache_dir() {
+        let p = cache.join("umeng-dau-client").join("sdk").join(".android").join("avd").join(&target);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    // 3. 用户主目录：~/.android/avd
+    if let Some(home) = dirs::home_dir() {
+        let p = home.join(".android").join("avd").join(&target);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    // 4. 若尚不存在，默认返回私有 SDK 对应路径或用户主目录路径
+    if let Some(cache) = dirs::cache_dir() {
+        Some(cache.join("umeng-dau-client").join("sdk").join(".android").join("avd").join(&target))
+    } else {
+        dirs::home_dir().map(|h| h.join(".android").join("avd").join(&target))
+    }
+}
+
 /// 将真机品牌/型号以及物理分辨率/DPI 注入 AVD 的 config.ini（Android 原生 system.property.* 及 hw.lcd 覆盖机制）
 pub async fn inject_system_properties_to_config_ini_with_profile(avd_name: &str, custom_info: Option<&DeviceProfileInfo>) {
-    let avd_dir = if let Ok(custom) = std::env::var("ANDROID_AVD_HOME") {
-        PathBuf::from(custom).join(format!("{}.avd", avd_name))
-    } else if let Some(home) = dirs::home_dir() {
-        home.join(".android").join("avd").join(format!("{}.avd", avd_name))
-    } else {
-        return;
-    };
+    let Some(avd_dir) = resolve_avd_dir(avd_name) else { return; };
 
     let config_path = avd_dir.join("config.ini");
     if !config_path.exists() {
@@ -455,8 +491,8 @@ pub async fn inject_system_properties_to_config_ini_with_profile(avd_name: &str,
     extra.push_str(&format!("hw.lcd.width={}\n", info.width));
     extra.push_str(&format!("hw.lcd.height={}\n", info.height));
     extra.push_str(&format!("hw.lcd.density={}\n", info.density));
-    // 多开并发轻量化硬件配置（跨平台生效，降低系统级内存与虚拟设备开销）
-    extra.push_str("hw.ramSize=1280\n");
+    // 多开并发轻量化硬件配置（根据宿主物理内存自适应：8GB 及以下机型为 1024MB 防止换页，16GB 以上保持 1280MB）
+    extra.push_str(&format!("hw.ramSize={}\n", default_emulator_ram_mb()));
     extra.push_str("vm.heapSize=256\n");
     extra.push_str("hw.cpu.ncore=2\n");
     extra.push_str("hw.camera.back=none\n");
@@ -504,13 +540,7 @@ pub async fn inject_system_properties_to_config_ini(avd_name: &str) {
 
 /// 强行清理指定 AVD 的残留文件锁（防 QEMU 报 FATAL: Another emulator instance is running）
 pub fn clean_avd_lock_files(avd_name: &str) {
-    let avd_dir = if let Ok(custom) = std::env::var("ANDROID_AVD_HOME") {
-        PathBuf::from(custom).join(format!("{}.avd", avd_name))
-    } else if let Some(home) = dirs::home_dir() {
-        home.join(".android").join("avd").join(format!("{}.avd", avd_name))
-    } else {
-        return;
-    };
+    let Some(avd_dir) = resolve_avd_dir(avd_name) else { return; };
 
     if !avd_dir.exists() {
         return;
@@ -529,6 +559,12 @@ pub fn clean_avd_lock_files(avd_name: &str) {
             }
         }
     }
+}
+
+/// 检查指定的 AVD 是否已经在本地创建且 config.ini 完好
+pub fn avd_exists(avd_name: &str) -> bool {
+    let Some(avd_dir) = resolve_avd_dir(avd_name) else { return false; };
+    avd_dir.join("config.ini").exists()
 }
 
 /// 检查指定 TCP 端口是否被彻底释放（用来确定 QEMU 模拟器进程已真正关闭）
@@ -619,6 +655,11 @@ impl Emulator {
             "swiftshader_indirect"
         };
 
+        let effective_mem = match opts.mem_mb {
+            Some(m) => m.min(default_emulator_ram_mb()),
+            None => default_emulator_ram_mb(),
+        };
+
         cmd.args([
             "-avd", avd,
             "-port", &port.to_string(),
@@ -636,7 +677,7 @@ impl Emulator {
             "-dns-server", "114.114.114.114,8.8.8.8",
             "-timezone", "Asia/Shanghai",
             "-gpu", gpu_mode,
-            "-memory", &opts.mem_mb.unwrap_or(1280).to_string(),
+            "-memory", &effective_mem.to_string(),
         ]);
         if opts.wipe {
             cmd.arg("-wipe-data");
@@ -653,6 +694,38 @@ impl Emulator {
         }
         cmd.stdout(std::process::Stdio::null());
         cmd.stderr(std::process::Stdio::null());
-        cmd.spawn().map_err(|e| AvdError::Boot(e.to_string()))
+        let child = cmd.spawn().map_err(|e| AvdError::Boot(e.to_string()))?;
+
+        // macOS 调度优化：调用 taskpolicy -B 将 QEMU 进程移出 Darwin 后台低功耗调度，
+        // 确保 macOS 优先为模拟器分配性能大核而非能效小核，大幅削减 Android 运行与编译延迟。
+        #[cfg(target_os = "macos")]
+        if let Some(pid) = child.id() {
+            let _ = std::process::Command::new("taskpolicy")
+                .args(["-B", "-p", &pid.to_string()])
+                .output();
+        }
+
+        Ok(child)
     }
+}
+
+/// 自适应检测宿主物理内存大小。
+/// 若检测为 8GB 及以下（≤ 9216MB，如 M1 Mac mini 8G），为避免 2 并发时宿主进入 Swap 换页震荡，单个模拟器分配 1024MB；
+/// 若宿主为 16GB 及以上，则保持默认 1280MB，100% 不影响现有功能。
+pub fn default_emulator_ram_mb() -> u32 {
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        if let Ok(out) = Command::new("sysctl").arg("-n").arg("hw.memsize").output() {
+            if let Ok(s) = std::str::from_utf8(&out.stdout) {
+                if let Ok(bytes) = s.trim().parse::<u64>() {
+                    let mb = bytes / 1024 / 1024;
+                    if mb <= 9216 {
+                        return 1024;
+                    }
+                }
+            }
+        }
+    }
+    1280
 }

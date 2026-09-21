@@ -103,9 +103,15 @@ pub struct EngineConfig {
     /// App 显示名称（aapt 解析，供桌面图标精确匹配启动；为空时 batch/pilot 起始时自动提取）
     #[serde(default)]
     pub app_label: String,
-    /// 是否在每批并发设备完成后自动通过手机 USB 飞行模式更换 IP（默认 false）
+    /// 是否在执行过程中自动通过手机 USB 飞行模式更换 IP（默认 false）
     #[serde(default)]
     pub auto_rotate_ip: bool,
+    /// 自动换 IP 的最小设备间隔（默认 60 台）
+    #[serde(default = "default_rotate_ip_interval_min")]
+    pub rotate_ip_interval_min: u32,
+    /// 自动换 IP 的最大设备间隔（默认 100 台）
+    #[serde(default = "default_rotate_ip_interval_max")]
+    pub rotate_ip_interval_max: u32,
     /// 指定换 IP 的手机序列号（None 则自动选第一台真机）
     #[serde(default)]
     pub rotate_ip_serial: Option<String>,
@@ -121,10 +127,39 @@ pub struct EngineConfig {
     /// 手机热点密码（Mac 自动强连用，Windows 可留空）
     #[serde(default)]
     pub rotate_ip_hotspot_password: Option<String>,
+    /// 是否开启执行时间段限制（默认 false）
+    #[serde(default)]
+    pub time_window_enabled: bool,
+    /// 允许执行的起始时间（HH:mm，例如 "08:00"，默认 "08:00"）
+    #[serde(default = "default_time_window_start", deserialize_with = "deserialize_time_window_start")]
+    pub time_window_start: String,
+    /// 允许执行的结束时间（HH:mm，例如 "22:00"，默认 "22:00"）
+    #[serde(default = "default_time_window_end", deserialize_with = "deserialize_time_window_end")]
+    pub time_window_end: String,
 }
 
+fn default_time_window_start() -> String { "08:00".to_string() }
+fn default_time_window_end() -> String { "22:00".to_string() }
+
+fn deserialize_time_window_start<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt = Option::<String>::deserialize(deserializer)?;
+    Ok(opt.filter(|s| !s.trim().is_empty()).unwrap_or_else(default_time_window_start))
+}
+
+fn deserialize_time_window_end<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt = Option::<String>::deserialize(deserializer)?;
+    Ok(opt.filter(|s| !s.trim().is_empty()).unwrap_or_else(default_time_window_end))
+}
 fn default_rotate_ip_disconnect() -> u32 { 4 }
 fn default_rotate_ip_reconnect() -> u32 { 6 }
+fn default_rotate_ip_interval_min() -> u32 { 60 }
+fn default_rotate_ip_interval_max() -> u32 { 100 }
 fn default_stack_capacity() -> u32 { 300 }
 fn default_l3_prob() -> f64 { 0.40 }
 fn default_full_push_prob() -> f64 { 0.60 }
@@ -160,11 +195,16 @@ impl Default for EngineConfig {
             stack_read_mode: crate::engine::profile_stack::StackReadMode::Random,
             app_label: String::new(),
             auto_rotate_ip: false,
+            rotate_ip_interval_min: 60,
+            rotate_ip_interval_max: 100,
             rotate_ip_serial: None,
             rotate_ip_disconnect_wait_s: 4,
             rotate_ip_reconnect_wait_s: 6,
             rotate_ip_hotspot_ssid: None,
             rotate_ip_hotspot_password: None,
+            time_window_enabled: false,
+            time_window_start: "08:00".into(),
+            time_window_end: "22:00".into(),
         }
     }
 }
@@ -299,29 +339,7 @@ pub async fn reset_device(ctx: &SlotCtx, avd: &str, port: u16) -> Result<Option<
             Ok(Some(uid))
         }
         ResetLevel::L3 => {
-            tracing::info!("[L3Reset] 开始重置模拟器: serial={}", serial);
-            // 优化：检查当前模拟器是否在线且已注入真机指纹
-            let is_online = ctx.adb.shell(&serial, &["getprop", "sys.boot_completed"]).await.unwrap_or_default().trim() == "1";
-            let cur_model = if is_online {
-                ctx.adb.shell(&serial, &["getprop", "ro.product.model"]).await.unwrap_or_default().trim().to_string()
-            } else {
-                String::new()
-            };
-
-            // 如果模拟器在线且已成功伪装为真机（非 sdk_gphone），直接执行单启动极速 In-place Reset
-            // 耗时仅 ~15s：清空旧 App 数据 + 抹除 settings_ssaid.xml + 平滑热重启 Zygote，
-            // 触发系统生成全新合法 ANDROID_ID，同时 100% 保护 /system 的真机 build.prop 不被 wipe 抹除！
-            if is_online && !cur_model.is_empty() && !cur_model.contains("sdk_gphone") && !cur_model.contains("google") {
-                tracing::info!("[L3Reset] ⚡ 命中已伪装真机模拟器 ({})，执行极速单启动重置...", cur_model);
-                if crate::uiautomation::prepare::reset_device_in_place(&ctx.adb, &serial, &cfg.pkg).await.is_ok() {
-                    ctx.adb.wait_net(&serial).await?;
-                    ctx.adb.install(&serial, Path::new(&cfg.apk_path), None).await?;
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                    return Ok(None);
-                }
-                tracing::warn!("[L3Reset] 极速重置遇到异常，平滑降级走重启流程");
-            }
-
+            tracing::info!("[L3Reset] 开始平滑重置模拟器: serial={}", serial);
             let _ = ctx.adb.emu_kill(&serial).await;
 
             // 等待端口彻底被 OS 释放（确认旧 QEMU 进程已完全终止）
@@ -336,10 +354,8 @@ pub async fn reset_device(ctx: &SlotCtx, avd: &str, port: u16) -> Result<Option<
 
             crate::avd::clean_avd_lock_files(avd);
 
-            // 关键优化：后续重启不加 -wipe-data，避免抹除 OverlayFS 中的真实 build.prop，
-            // 使开机后立即命中 apply_device_spoofing 的早退分支，跳过二次重启，实现单次启动。
             let opts = BootOpts {
-                wipe: false,
+                wipe: true,
                 mem_mb: Some(cfg.emu_mem_mb),
                 http_proxy: if cfg.use_proxy { ctx.proxy_addr } else { None },
                 max_users: cfg.max_users,
@@ -366,9 +382,11 @@ pub async fn reset_device(ctx: &SlotCtx, avd: &str, port: u16) -> Result<Option<
             // 检查并确保指纹（如已匹配则秒级跳过）
             crate::uiautomation::prepare::apply_device_spoofing(&ctx.adb, &ctx.emulator, avd, port, &opts).await;
 
-            ctx.adb.wait_net(&serial).await?;
-            ctx.adb.install(&serial, Path::new(&cfg.apk_path), None).await?;
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            tokio::try_join!(
+                ctx.adb.wait_net(&serial),
+                ctx.adb.install(&serial, Path::new(&cfg.apk_path), None)
+            )?;
+            tokio::time::sleep(Duration::from_millis(500)).await;
             Ok(None)
         }
     }
@@ -391,11 +409,12 @@ pub struct RunAppOutcome {
 /// 4. HOME + flush_dwell（固定时长）
 pub async fn run_app(
     ctx: &SlotCtx,
-    port: u16,
+    serial: &str,
+    _port: u16,
     user: Option<u32>,
     index: u32,
 ) -> Result<RunAppOutcome, AdbError> {
-    let serial = format!("emulator-{}", port);
+    let serial = serial.to_string();
     let cfg = &ctx.config;
     let mut outcome = RunAppOutcome::default();
 
@@ -432,9 +451,10 @@ pub async fn run_app(
     .await;
     outcome.prepare = Some(prep.clone());
 
-    // ---- 2. 启动 App，等首屏渲染（固定时长）----
+    // ---- 2. 启动 App，等首屏初次渲染（给予 2 秒启动缓冲，随后由 Onboarding 动态接管）----
     ctx.adb.launch_app(&serial, &cfg.pkg, user, &cfg.app_label).await?;
-    tokio::time::sleep(Duration::from_secs(cfg.dwell_s as u64)).await;
+    let launch_wait = if cfg.ui.enabled { 2 } else { cfg.dwell_s as u64 };
+    tokio::time::sleep(Duration::from_secs(launch_wait)).await;
 
     // ---- 3. onboarding 多层引导循环 ----
     let screen = crate::uiautomation::interactor::Interactor::fetch_screen(&ctx.adb, &serial).await?;
@@ -476,27 +496,169 @@ pub async fn run_app(
     }
     outcome.onboarding = Some(onb);
 
-    // ---- 4. 主页交互：点击顶部轮播位触发内容埋点 + 短暂浏览 ----
-    // 性能优化：onboarding 已到主页，此处不再 dump 找轮播节点（dump 命中率低且慢 ~3-4s，
-    // 且 dump 在视频类 App 信息流页面可能因持续动画而超时），直接点击主页顶部黄金轮播位即可。
+    // ---- 4. 主页交互：打开轮播图上方的文章，并确认已进入文章详情页 ----
+    open_top_article_and_verify(&ctx.adb, &serial, screen, &cfg.pkg, index).await;
+
+    // ---- 5. 退出流程：先把 App 返回到后台，等待数据上报，再退出应用 ----
     let iac = crate::uiautomation::Interactor::new(ctx.adb.clone(), serial.clone(), screen);
-    let bx = screen.ratio_x(0.50);
-    let by = screen.ratio_y(0.25);
-    tracing::info!("主页交互: 点击主页顶部轮播区 ({}, {})", bx, by);
-    let _ = iac.tap(bx, by).await;
+    // 从文章详情页平滑返回主页
+    let _ = iac.back().await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
 
-    // 主页浏览停留（8~15s 随机，模拟真实用户主页信息流浏览交互）
-    let dwell_secs = pseudo_random_range(8, 15, index as u64);
-    tracing::info!("主页交互: 浏览停留 {} 秒...", dwell_secs);
-    tokio::time::sleep(Duration::from_secs(dwell_secs)).await;
-
-    // ---- 5. HOME + flush（固定时长）----
+    // 把 App 返回到后台桌面
     if let Err(e) = ctx.adb.key_home(&serial).await {
         tracing::warn!("HOME keyevent 执行受阻 ({})，继续执行 flush 驻留...", e);
     }
-    tokio::time::sleep(Duration::from_secs(cfg.ui.flush_dwell_s as u64)).await;
+    // 切后台驻留 2~3 秒，给友盟 SDK 留出异步 HTTP 数据包打包上报时间
+    let flush_time = (cfg.ui.flush_dwell_s as u64).min(3).max(2);
+    tracing::info!("应用切后台: 驻留 {} 秒以完成友盟数据落盘与网络上报...", flush_time);
+    tokio::time::sleep(Duration::from_secs(flush_time)).await;
+
+    // 后台数据上报完成后，正式退出 App 进程
+    tracing::info!("应用切后台驻留完成，正式退出 App: {}", cfg.pkg);
+    let _ = ctx.adb.shell(&serial, &["am", "force-stop", &cfg.pkg]).await;
 
     Ok(outcome)
+}
+
+/// 主页交互：打开轮播图上方的文章，并确认已进入文章详情页
+pub async fn open_top_article_and_verify(
+    adb: &crate::adb::Adb,
+    serial: &str,
+    screen: crate::uiautomation::interactor::ScreenInfo,
+    pkg: &str,
+    index: u32,
+) {
+    let iac = crate::uiautomation::Interactor::new(adb.clone(), serial.to_string(), screen);
+    let home_focus = adb.current_focus(serial).await.unwrap_or_default();
+    tracing::info!("主页交互: 准备打开轮播图上方的文章，主页初始焦点: {:?}", home_focus);
+
+    // 候选点击位置序列：兜底中心优选 0.33，备选 0.30、0.36（均位于 Tab 与 轮播图正中间）
+    let candidate_ratios = [(0.50f32, 0.33f32), (0.50f32, 0.30f32), (0.50f32, 0.36f32)];
+    let mut article_opened = false;
+
+    // 优先通过 UI dump 精准定位轮播图上方文章节点（带异步刷新重试）
+    let mut tap_pos = None;
+    for dump_attempt in 0..2 {
+        if let Ok(xml) = adb.uiautomator_dump(serial, true).await {
+            if let Ok(dump) = crate::uiautomation::dump::UiDump::parse(&xml) {
+                let top_bound = screen.ratio_y(0.18);
+                let bottom_bound = screen.ratio_y(0.42);
+                let left_bound = screen.ratio_x(0.05);
+                let right_bound = screen.ratio_x(0.95);
+
+                // 优先级 1：精准匹配控件 ID（优先最新的 home_top_title_view，兼容 top_w_title_view）
+                let candidate_node = dump.nodes.iter().find(|n| {
+                    let id = n.resource_id.as_str();
+                    id.ends_with("home_top_title_view") || id.ends_with("top_w_title_view")
+                }).or_else(|| {
+                    // 优先级 2：按区域与文本特征启发式查找（位于 Tab 栏与轮播图之间的非空文字节点）
+                    dump.nodes.iter().find(|n| {
+                        let (cx, cy) = n.bounds.center();
+                        let text = n.text.trim();
+                        cy >= top_bound
+                            && cy <= bottom_bound
+                            && cx >= left_bound
+                            && cx <= right_bound
+                            && text.chars().count() >= 4
+                            && !text.contains("搜索")
+                            && !text.contains("关键字")
+                            && !text.contains("首页")
+                            && !text.contains("精读")
+                            && !text.contains("直播")
+                    })
+                });
+
+                if let Some(node) = candidate_node {
+                    // 直接取文章文字本身的中心坐标，确保 100% 点击在文章文字区域内，绝不偏移到轮播图
+                    let (cx, cy) = node.bounds.center();
+                    tracing::info!(
+                        "主页交互: 成功精准锁定顶部文章节点: text={:?}, id={:?}, 坐标=({}, {})",
+                        node.text,
+                        node.resource_id,
+                        cx,
+                        cy
+                    );
+                    tap_pos = Some((cx, cy));
+                    break;
+                }
+            }
+        }
+        if dump_attempt == 0 && tap_pos.is_none() {
+            // 首屏数据若异步渲染中，等待 600ms 再探测一次
+            tokio::time::sleep(Duration::from_millis(600)).await;
+        }
+    }
+
+    // 执行点击并进行确认循环（最多重试 3 次）
+    for round in 0..3 {
+        let (tx, ty) = if let Some(pos) = tap_pos {
+            // 命中精确节点时，优先坚持点击该精确位置
+            pos
+        } else {
+            let (rx, ry) = candidate_ratios[round.min(candidate_ratios.len() - 1)];
+            (screen.ratio_x(rx), screen.ratio_y(ry))
+        };
+
+        tracing::info!("主页交互: 第 {} 次尝试点击顶部文章，坐标: ({}, {})", round + 1, tx, ty);
+        let _ = iac.tap(tx, ty).await;
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        // 判定 1：当前前台 Activity 变化（最权威）
+        if let Ok((cur_pkg, cur_act)) = adb.current_focus(serial).await {
+            if cur_pkg == pkg && !cur_act.is_empty() && cur_act != home_focus.1 {
+                tracing::info!(
+                    "✅ 确定打开了文章页面: 前台 Activity 已跳转到 {} (原主页: {})",
+                    cur_act,
+                    home_focus.1
+                );
+                article_opened = true;
+                break;
+            }
+        }
+
+        // 判定 2：若 Activity 没变（单 Activity 架构），检测页面 dump 是否有返回键或主页元素消失
+        if let Ok(xml) = adb.uiautomator_dump(serial, true).await {
+            if let Ok(dump) = crate::uiautomation::dump::UiDump::parse(&xml) {
+                let has_back = dump.nodes.iter().any(|n| {
+                    let id = n.resource_id.to_lowercase();
+                    let desc = n.content_desc.to_lowercase();
+                    let text = n.text.trim();
+                    id.contains("back") || desc.contains("返回") || text == "返回"
+                });
+                let has_article_action = dump.nodes.iter().any(|n| {
+                    let t = n.text.trim();
+                    t.contains("评论") || t.contains("写评论") || t.contains("分享") || t.contains("点赞")
+                });
+                let has_home_nav = dump.has_bottom_nav(screen.h);
+
+                if (has_back || has_article_action) && !has_home_nav {
+                    tracing::info!("✅ 确定打开了文章页面: 检测到文章详情页特征（返回键/评论操作，主页导航已离开）");
+                    article_opened = true;
+                    break;
+                }
+            }
+        }
+
+        tracing::warn!("主页交互: 第 {} 次点击后未检测到文章页面打开，尝试下一轮重试...", round + 1);
+    }
+
+    if !article_opened {
+        tracing::warn!("主页交互: 经过多次尝试，未能明确断言进入文章页面，按计划继续停留以保证流程");
+    }
+
+    // 文章浏览停留（4~7s 随机，模拟真实用户浏览文章，充足触发页面时长埋点）
+    let dwell_secs = pseudo_random_range(4, 7, index as u64);
+    tracing::info!("文章页面交互: 浏览停留 {} 秒...", dwell_secs);
+
+    // 在停留中间轻微上滑一下，模拟真实用户的滑动阅读操作
+    if dwell_secs >= 4 {
+        tokio::time::sleep(Duration::from_secs(dwell_secs / 2)).await;
+        let _ = iac.swipe(screen.w / 2, screen.h * 6 / 10, screen.w / 2, screen.h * 4 / 10, 300).await;
+        tokio::time::sleep(Duration::from_secs(dwell_secs - dwell_secs / 2)).await;
+    } else {
+        tokio::time::sleep(Duration::from_secs(dwell_secs)).await;
+    }
 }
 
 /// 均匀伪随机浮点数生成器 [0.0, 1.0)（使用 Splitmix64 散列解决 macOS/Windows 微秒对齐导致的 nanos % 1000 偏置 Bug）
@@ -540,7 +702,7 @@ pub async fn run_one_device(
 ) -> DeviceResult {
     let started = std::time::Instant::now();
     let started_at = beijing_now();
-    let serial = format!("emulator-{}", port);
+    let serial = ctx.adb.connect_and_resolve_serial(port).await;
     let mut result = DeviceResult {
         index,
         slot,
@@ -577,7 +739,7 @@ pub async fn run_one_device(
         }
     };
 
-    match run_app(ctx, port, user, index).await {
+    match run_app(ctx, &serial, port, user, index).await {
         Ok(outcome) => {
             result.prepare = outcome.prepare;
             result.onboarding = outcome.onboarding;
@@ -645,9 +807,68 @@ pub fn estimate_finish(cfg: &EngineConfig) -> (String, bool) {
     (finish.format("%Y-%m-%d %H:%M UTC+8").to_string(), crosses_midnight)
 }
 
+/// 解析 HH:mm 为当天的总分钟数（0 ~ 1439）
+pub fn parse_hh_mm(s: &str) -> Option<u32> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() >= 2 {
+        let h = parts[0].trim().parse::<u32>().ok()?;
+        let m = parts[1].trim().parse::<u32>().ok()?;
+        if h < 24 && m < 60 {
+            return Some(h * 60 + m);
+        }
+    }
+    None
+}
+
+/// 判断指定分钟数是否在 [start_min, end_min) 窗口内（支持跨午夜）
+pub fn check_time_in_window(cur_min: u32, start_min: u32, end_min: u32) -> bool {
+    if start_min <= end_min {
+        // 常规日间区间（如 08:00 - 22:00，480 ~ 1320）
+        cur_min >= start_min && cur_min < end_min
+    } else {
+        // 跨午夜区间（如 22:00 - 04:00，1320 ~ 240）
+        cur_min >= start_min || cur_min < end_min
+    }
+}
+
+/// 检查当前北京时间是否在设定的时间窗口内
+pub fn is_within_time_window(cfg: &EngineConfig) -> bool {
+    if !cfg.time_window_enabled {
+        return true;
+    }
+    let start_min = parse_hh_mm(&cfg.time_window_start).unwrap_or(8 * 60);
+    let end_min = parse_hh_mm(&cfg.time_window_end).unwrap_or(22 * 60);
+
+    let utc = chrono::Utc::now();
+    let bj = utc + chrono::Duration::hours(8);
+    use chrono::Timelike;
+    let cur_min = bj.hour() * 60 + bj.minute();
+
+    check_time_in_window(cur_min, start_min, end_min)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_time_window_check() {
+        // 常规时间段 08:00 (480) - 22:00 (1320)
+        assert!(check_time_in_window(480, 480, 1320));  // 08:00 在窗口
+        assert!(check_time_in_window(720, 480, 1320));  // 12:00 在窗口
+        assert!(check_time_in_window(1319, 480, 1320)); // 21:59 在窗口
+        assert!(!check_time_in_window(1320, 480, 1320)); // 22:00 不在窗口
+        assert!(!check_time_in_window(479, 480, 1320));  // 07:59 不在窗口
+        assert!(!check_time_in_window(0, 480, 1320));    // 00:00 不在窗口
+
+        // 跨午夜时间段 22:00 (1320) - 04:00 (240)
+        assert!(check_time_in_window(1320, 1320, 240)); // 22:00 在窗口
+        assert!(check_time_in_window(1400, 1320, 240)); // 23:20 在窗口
+        assert!(check_time_in_window(0, 1320, 240));    // 00:00 在窗口
+        assert!(check_time_in_window(239, 1320, 240));  // 03:59 在窗口
+        assert!(!check_time_in_window(240, 1320, 240)); // 04:00 不在窗口
+        assert!(!check_time_in_window(600, 1320, 240)); // 10:00 不在窗口
+    }
 
     #[test]
     fn test_pseudo_random_distribution() {

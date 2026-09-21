@@ -111,20 +111,36 @@ impl Adb {
     pub async fn run_on(&self, serial: &str, args: &[&str]) -> Result<String, AdbError> {
         let mut full: Vec<&str> = vec!["-s", serial];
         full.extend_from_slice(args);
-        let res = self.run(&full).await;
-        if let Err(ref err) = res {
-            if is_device_offline_or_not_found(err) {
-                if let Some(port_str) = serial.strip_prefix("emulator-") {
-                    if let Ok(port) = port_str.parse::<u16>() {
-                        let _ = self.connect(&format!("127.0.0.1:{}", port + 1)).await;
-                        tokio::time::sleep(Duration::from_millis(500)).await;
-                        return self.run(&full).await;
+        match self.run(&full).await {
+            Ok(out) => Ok(out),
+            Err(err) => {
+                if is_device_offline_or_not_found(&err) {
+                    if let Some(port_str) = serial.strip_prefix("emulator-") {
+                        if let Ok(port) = port_str.parse::<u16>() {
+                            let alt_serial = format!("127.0.0.1:{}", port + 1);
+                            let _ = self.connect(&alt_serial).await;
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                            let mut alt_full: Vec<&str> = vec!["-s", &alt_serial];
+                            alt_full.extend_from_slice(args);
+                            if let Ok(alt_out) = self.run(&alt_full).await {
+                                return Ok(alt_out);
+                            }
+                        }
+                    } else if let Some(addr_str) = serial.strip_prefix("127.0.0.1:") {
+                        if let Ok(p_plus_1) = addr_str.parse::<u16>() {
+                            let alt_serial = format!("emulator-{}", p_plus_1.saturating_sub(1));
+                            let mut alt_full: Vec<&str> = vec!["-s", &alt_serial];
+                            alt_full.extend_from_slice(args);
+                            if let Ok(alt_out) = self.run(&alt_full).await {
+                                return Ok(alt_out);
+                            }
+                        }
                     }
+                    return Err(AdbError::DeviceOffline { serial: serial.to_string() });
                 }
-                return Err(AdbError::DeviceOffline { serial: serial.to_string() });
+                Err(err)
             }
         }
-        res
     }
 
     /// 启动私有 adb server（幂等）
@@ -149,19 +165,65 @@ impl Adb {
         Ok(())
     }
 
-    /// 等待启动完成（boot_completed=1），等价脚本 wait_boot
-    pub async fn wait_boot(&self, serial: &str, timeout: Duration) -> Result<(), AdbError> {
-        let mut adb_target_port = None;
-        if let Some(port_str) = serial.strip_prefix("emulator-") {
-            if let Ok(port) = port_str.parse::<u16>() {
-                adb_target_port = Some(port + 1);
+    /// 自动解析并打通指定端口模拟器的真实 ADB 序列号（如 emulator-5554 或 127.0.0.1:5557）
+    pub async fn connect_and_resolve_serial(&self, port: u16) -> String {
+        let std_serial = format!("emulator-{}", port);
+        let tcp_serial = format!("127.0.0.1:{}", port + 1);
+
+        // 最多尝试 3 轮，每轮间隔递增（QEMU 启动后 ADB 端口可能需要数秒才就绪）
+        for attempt in 0..3 {
+            if let Ok(devs) = self.devices().await {
+                if devs.contains(&std_serial) {
+                    return std_serial;
+                }
+                if devs.contains(&tcp_serial) {
+                    return tcp_serial;
+                }
+            }
+
+            // 主动 connect（对 port != 5554 的从槽位尤其重要）
+            let _ = self.connect(&tcp_serial).await;
+            tokio::time::sleep(Duration::from_millis(if attempt == 0 { 500 } else { 1000 })).await;
+
+            if let Ok(devs) = self.devices().await {
+                if devs.contains(&tcp_serial) {
+                    return tcp_serial;
+                }
+                if devs.contains(&std_serial) {
+                    return std_serial;
+                }
             }
         }
 
+        // 兜底返回：port 5554 用原生名，其余用 TCP 地址
+        if port == 5554 {
+            std_serial
+        } else {
+            tcp_serial
+        }
+    }
+
+    /// 等待启动完成（boot_completed=1），等价脚本 wait_boot
+    pub async fn wait_boot(&self, serial: &str, timeout: Duration) -> Result<(), AdbError> {
+        // 计算需要定期重连的 TCP 地址：
+        // - serial 为 "emulator-5556" 时 → 重连 "127.0.0.1:5557"
+        // - serial 为 "127.0.0.1:5557" 时 → 重连自身（QEMU 可能启动时端口还没就绪）
+        let reconnect_addr = if let Some(port_str) = serial.strip_prefix("emulator-") {
+            port_str.parse::<u16>().ok().filter(|&p| p != 5554).map(|p| format!("127.0.0.1:{}", p + 1))
+        } else if serial.starts_with("127.0.0.1:") {
+            Some(serial.to_string())
+        } else {
+            None
+        };
+
         tokio::time::timeout(timeout, async {
+            let mut round = 0;
             loop {
-                if let Some(p) = adb_target_port {
-                    let _ = self.connect(&format!("127.0.0.1:{}", p)).await;
+                round += 1;
+                if round % 4 == 1 {
+                    if let Some(ref addr) = reconnect_addr {
+                        let _ = self.connect(addr).await;
+                    }
                 }
                 let out = self
                     .run_on(serial, &["shell", "getprop", "sys.boot_completed"])
@@ -170,7 +232,7 @@ impl Adb {
                 if out.trim() == "1" {
                     return Ok(());
                 }
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                tokio::time::sleep(Duration::from_millis(500)).await;
             }
         })
         .await
@@ -180,23 +242,96 @@ impl Adb {
         })?
     }
 
-    /// 等待网络就绪（v2 修复 #4：boot_completed=1 时网络往往未通）
-    /// 支持多 IP / QEMU 网关 / DNS 属性轮询，防止单一 ICMP 被代理或宿主机防火墙阻断
+    /// 等待网络就绪（多维度探测，支持系统网络服务、虚拟网关、DHCP IP 与外网连通）：
+    pub async fn check_net_quick(&self, serial: &str) -> bool {
+        let check_script = r#"
+            # 1. 检查 Android 核心 ConnectivityManager 默认网络（官方权威状态）
+            if dumpsys connectivity 2>/dev/null | grep -qE "Active default network: [0-9]+"; then
+                echo "NET_OK"
+                exit 0
+            fi
+
+            # 2. 检查 QEMU 虚拟网关 (10.0.2.2 / 10.0.2.3) 连通性（放宽至 2s 避免与 adb install 争抢 CPU 时超时）
+            if ping -c 1 -w 2 10.0.2.2 >/dev/null 2>&1 || ping -c 1 -w 2 10.0.2.3 >/dev/null 2>&1; then
+                echo "NET_OK"
+                exit 0
+            fi
+
+            # 3. 检查外网 HTTPS (443) 或 HTTP (80)
+            if nc -w 2 www.baidu.com 443 </dev/null >/dev/null 2>&1 || nc -w 2 www.baidu.com 80 </dev/null >/dev/null 2>&1; then
+                echo "NET_OK"
+                exit 0
+            fi
+
+            # 4. 检查公共 DNS 连通性
+            if ping -c 1 -w 2 223.5.5.5 >/dev/null 2>&1 || ping -c 1 -w 2 114.114.114.114 >/dev/null 2>&1; then
+                echo "NET_OK"
+                exit 0
+            fi
+
+            # 5. 检查虚拟网卡 eth0 / wlan0 是否已通过 DHCP 分配到有效 IP
+            if ip -4 addr show 2>/dev/null | grep -qE "inet 10\.0\.2\."; then
+                echo "NET_OK"
+                exit 0
+            fi
+
+            echo "NET_WAIT"
+            exit 0
+        "#;
+        if let Ok(out) = self.run_on(serial, &["shell", "sh", "-c", check_script]).await {
+            out.contains("NET_OK")
+        } else {
+            false
+        }
+    }
+
+    /// 等待网络就绪（放宽至 45 秒高容错，主动唤醒网络栈，一旦就绪毫秒级放行）
     pub async fn wait_net(&self, serial: &str) -> Result<(), AdbError> {
-        for _ in 0..40 {
-            if let Ok(dns) = self.run_on(serial, &["shell", "getprop", "net.dns1"]).await {
-                let dns_str = dns.trim();
-                if !dns_str.is_empty() && dns_str != "0.0.0.0" && !dns_str.contains("device") {
-                    return Ok(());
-                }
-            }
-            if self.run_on(serial, &["shell", "ping", "-c", "1", "-W", "1", "223.5.5.5"]).await.is_ok()
-                || self.run_on(serial, &["shell", "ping", "-c", "1", "-W", "1", "10.0.2.2"]).await.is_ok()
-                || self.run_on(serial, &["shell", "ping", "-c", "1", "-W", "1", "114.114.114.114"]).await.is_ok()
-            {
+        // 开局主动唤醒一次网络接口，避免冷启动后网络栈未激活
+        let _ = self.shell(serial, &["sh", "-c", "svc wifi enable; svc data enable; settings put global mobile_data 1"]).await;
+
+        for round in 0..90 {
+            if self.check_net_quick(serial).await {
                 return Ok(());
             }
+            // 每隔 10 秒主动重新下发一次网络激活，防止虚拟网卡在冷启动或换 IP 时挂起
+            if round > 0 && round % 20 == 0 {
+                let _ = self.shell(serial, &["sh", "-c", "svc wifi enable; svc data enable"]).await;
+            }
             tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+
+        // 软性兜底 1：系统 ConnectivityManager 已激活默认网络或处于 CONNECTED 状态
+        if let Ok(conn) = self.shell(serial, &["dumpsys", "connectivity"]).await {
+            if conn.contains("Active default network:") && !conn.contains("Active default network: none") {
+                tracing::info!("[wait_net] ConnectivityManager 默认网络已激活，软性放行");
+                return Ok(());
+            }
+            if conn.contains("state: CONNECTED") {
+                tracing::info!("[wait_net] 网络接口处于 CONNECTED 状态，软性放行");
+                return Ok(());
+            }
+        }
+
+        // 软性兜底 2：QEMU 虚拟网关 (10.0.2.2) 连通
+        if let Ok(out) = self.shell(serial, &["ping", "-c", "1", "-w", "2", "10.0.2.2"]).await {
+            if out.contains("1 received") || out.contains("1 packets received") {
+                tracing::info!("[wait_net] QEMU 虚拟网关 (10.0.2.2) 连通，软性放行");
+                return Ok(());
+            }
+        }
+
+        // 软性兜底 3：网卡已通过 DHCP 分配到有效局域网 IP
+        if let Ok(out) = self.shell(serial, &["ip", "-4", "addr", "show"]).await {
+            if out.contains("10.0.2.") {
+                tracing::info!("[wait_net] 虚拟网卡已通过 DHCP 分配到 IP，软性放行");
+                return Ok(());
+            }
+        }
+
+        // 若全部超时，输出网络诊断日志以便精准定位
+        if let Ok(diag) = self.run_on(serial, &["shell", "dumpsys connectivity | grep -E 'Active default|NetworkAgentInfo'; ip -4 addr show"]).await {
+            tracing::warn!("[wait_net] 超时网络诊断信息: serial={}, diag={}", serial, diag.trim());
         }
         Err(AdbError::NetTimeout { serial: serial.into() })
     }
@@ -223,9 +358,11 @@ impl Adb {
         })?
     }
 
-    /// 自动重试的 APK 安装（最多重试 3 次，解决 L3 wipe-data 后 PackageManager 暂未准备就绪导致的偶现安装失败）
+    /// 自动重试的 APK 安装（极速免编译优化：利用 quicken 策略规避耗时 15s 的 AOT 编译，秒级装包）
     pub async fn install(&self, serial: &str, apk: &Path, user: Option<u32>) -> Result<(), AdbError> {
         let _ = self.wait_package_manager(serial, Duration::from_secs(15)).await;
+        // 极速安装核心优化：将系统安装策略置为 quicken，避开 M1 上极其昂贵的 dex2oat AOT 暴力全量编译，瞬间完成安装
+        let _ = self.shell(serial, &["setprop", "pm.dexopt.install", "quicken"]).await;
         let apk_s = apk.display().to_string();
         let mut last_err = None;
 
@@ -233,10 +370,10 @@ impl Adb {
             let res = match user {
                 Some(u) => {
                     let u = u.to_string();
-                    self.run_on(serial, &["install", "-r", "--user", &u, &apk_s]).await
+                    self.run_on(serial, &["install", "-r", "-d", "-t", "--user", &u, &apk_s]).await
                 }
                 None => {
-                    self.run_on(serial, &["install", "-r", &apk_s]).await
+                    self.run_on(serial, &["install", "-r", "-d", "-t", &apk_s]).await
                 }
             };
 
@@ -565,9 +702,30 @@ impl Adb {
 
     /// resolve-activity 拿 ComponentName 后标准 am start（fallback 方式）
     async fn launch_via_am(&self, serial: &str, pkg: &str, user: Option<u32>) -> Result<(), AdbError> {
-        let resolved = self
-            .run_on(serial, &["shell", "cmd", "package", "resolve-activity", "--brief", "-c", "android.intent.category.LAUNCHER", pkg])
-            .await?;
+        let mut resolved = String::new();
+        let mut last_err = None;
+        for i in 0..3 {
+            match self
+                .run_on(serial, &["shell", "cmd", "package", "resolve-activity", "--brief", "-c", "android.intent.category.LAUNCHER", pkg])
+                .await
+            {
+                Ok(out) => {
+                    resolved = out;
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!(serial, attempt = i + 1, error = %e, "[LaunchApp] resolve-activity 暂时失败，等待重试...");
+                    last_err = Some(e);
+                    tokio::time::sleep(std::time::Duration::from_millis(600 * (i + 1) as u64)).await;
+                }
+            }
+        }
+        if resolved.is_empty() {
+            if let Some(err) = last_err {
+                return Err(err);
+            }
+        }
+
         let component = resolved
             .lines()
             .last()
@@ -611,24 +769,20 @@ impl Adb {
     }
 
     pub async fn key_home(&self, serial: &str) -> Result<(), AdbError> {
-        match self.run_on(serial, &["shell", "input", "keyevent", "KEYCODE_HOME"]).await {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                // 如果 socket 断开或 device not found，尝试快速重连并重试一次
-                if let Some(port_str) = serial.strip_prefix("emulator-") {
-                    if let Ok(port) = port_str.parse::<u16>() {
-                        let _ = self.connect(&format!("127.0.0.1:{}", port + 1)).await;
-                        tokio::time::sleep(Duration::from_millis(500)).await;
-                        return self.run_on(serial, &["shell", "input", "keyevent", "KEYCODE_HOME"]).await.map(|_| ());
-                    }
-                }
-                Err(e)
-            }
-        }
+        self.run_on(serial, &["shell", "input", "keyevent", "KEYCODE_HOME"]).await.map(|_| ())
     }
 
     pub async fn emu_kill(&self, serial: &str) -> Result<(), AdbError> {
         let _ = self.run_on(serial, &["emu", "kill"]).await;
+        if let Some(port_str) = serial.strip_prefix("emulator-") {
+            if let Ok(port) = port_str.parse::<u16>() {
+                crate::avd::kill_emulator_on_port(port).await;
+            }
+        } else if let Some(addr_str) = serial.strip_prefix("127.0.0.1:") {
+            if let Ok(p_plus_1) = addr_str.parse::<u16>() {
+                crate::avd::kill_emulator_on_port(p_plus_1.saturating_sub(1)).await;
+            }
+        }
         Ok(())
     }
 
@@ -1008,6 +1162,8 @@ fn is_device_offline_or_not_found(err: &AdbError) -> bool {
             let s = stderr.to_lowercase();
             s.contains("device offline")
                 || s.contains("device not found")
+                || s.contains("protocol fault")
+                || s.contains("connection reset")
                 || (s.contains("device") && (s.contains("not found") || s.contains("offline")))
         }
         _ => false,

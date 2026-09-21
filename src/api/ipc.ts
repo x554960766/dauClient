@@ -43,6 +43,7 @@ export const api = {
   resetProfileUsage: () => invoke<void>("reset_profile_usage"),
 
   detectUsbPhones: () => invoke<import("./types").UsbPhoneInfo[]>("detect_usb_phones"),
+  getCurrentPublicIp: (serial?: string) => invoke<string | null>("get_current_public_ip", { serial }),
   testRotateIp: (params?: {
     serial?: string;
     disconnect_wait_s?: number;
@@ -72,10 +73,15 @@ export function defaultConfig(): EngineConfig {
     full_push_probability: 0.60,
     enable_stack_mode: true,
     auto_rotate_ip: false,
+    rotate_ip_interval_min: 60,
+    rotate_ip_interval_max: 100,
     rotate_ip_serial: null,
     rotate_ip_disconnect_wait_s: 4,
     rotate_ip_reconnect_wait_s: 6,
     rotate_ip_hotspot_ssid: "P70",
     rotate_ip_hotspot_password: "123456789",
+    time_window_enabled: false,
+    time_window_start: "08:00",
+    time_window_end: "22:00",
   };
 }

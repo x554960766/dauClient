@@ -27,7 +27,7 @@ export async function onBatchDevice(cb: (p: any) => void): Promise<UnlistenFn> {
 }
 
 export async function onBatchProgress(
-  cb: (p: { ok: number; fail: number; done: boolean; umeng_hits?: number }) => void
+  cb: (p: { ok: number; fail: number; done: boolean; umeng_hits?: number; blocked_hits?: number }) => void
 ): Promise<UnlistenFn> {
   return listen("batch://progress", (e) => cb(e.payload as any));
 }
@@ -36,4 +36,10 @@ export async function onBatchIpStatus(
   cb: (p: { rotating: boolean; message: string; ip?: string }) => void
 ): Promise<UnlistenFn> {
   return listen("batch://ip_status", (e) => cb(e.payload as any));
+}
+
+export async function onBatchTimeWindowStatus(
+  cb: (p: { waiting: boolean; start: string; end: string; message: string }) => void
+): Promise<UnlistenFn> {
+  return listen("batch://time_window_status", (e) => cb(e.payload as any));
 }

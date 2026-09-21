@@ -127,6 +127,14 @@ pub async fn detect_usb_phones(state: State<'_, SharedState>) -> Result<Vec<crat
 }
 
 #[tauri::command]
+pub async fn get_current_public_ip(
+    state: State<'_, SharedState>,
+    serial: Option<String>,
+) -> Result<Option<String>, String> {
+    Ok(crate::adb::rotate_ip::get_phone_or_public_ip(&state.sdk_dir, serial.as_deref()).await)
+}
+
+#[tauri::command]
 pub async fn test_rotate_ip(
     state: State<'_, SharedState>,
     serial: Option<String>,
@@ -159,6 +167,9 @@ pub async fn cleanup_orphans(state: State<'_, SharedState>) -> Result<usize, Str
         .filter(|n| n.starts_with("dau-") || n.starts_with("dau_") || n.contains("dau"))
         .collect();
     let count = ours.len();
+    for port in [5554, 5556, 5558, 5560] {
+        let _ = adb.emu_kill(&format!("emulator-{}", port)).await;
+    }
     for name in &ours {
         tracing::info!(avd = %name, "自动清理残留 AVD");
         let _ = avdm.delete(name).await;

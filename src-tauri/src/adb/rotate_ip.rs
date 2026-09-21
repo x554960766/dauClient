@@ -188,6 +188,38 @@ pub async fn get_current_public_ip() -> Option<String> {
     None
 }
 
+/// 优先通过 USB 手机直接向公网探测手机自身的蜂窝公网 IP（彻底绕过宿主机代理/VPN），无真机时探测电脑出口
+pub async fn get_phone_or_public_ip(sdk_dir: &Path, serial_opt: Option<&str>) -> Option<String> {
+    let bin = resolve_adb_bin(sdk_dir);
+
+    let target_serial = if let Some(s) = serial_opt {
+        Some(s.to_string())
+    } else {
+        let phones = detect_usb_phones(sdk_dir).await;
+        phones.into_iter().find(|p| p.status == "device").map(|p| p.serial)
+    };
+
+    if let Some(serial) = target_serial {
+        let shell_script = "curl -s -4 --max-time 3 http://ip.sb || curl -s -4 --max-time 3 http://ifconfig.me/ip || curl -s -4 --max-time 3 https://api.ipify.org || wget -qO- -T 3 http://ip.sb";
+        let mut cmd = Command::new(&bin);
+        #[cfg(target_os = "windows")]
+        {
+            cmd.creation_flags(0x08000000);
+        }
+        if let Ok(out) = cmd.args(["-s", &serial, "shell", shell_script]).output().await {
+            let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            for line in text.lines() {
+                let s = line.trim();
+                if s.split('.').count() == 4 && s.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                    return Some(s.to_string());
+                }
+            }
+        }
+    }
+
+    get_current_public_ip().await
+}
+
 /// 执行单次 ADB 飞行模式换 IP 操作
 pub async fn rotate_ip_via_adb(
     sdk_dir: &Path,
@@ -216,9 +248,9 @@ pub async fn rotate_ip_via_adb(
 
     tracing::info!(target_serial = %target_serial, "开始执行 USB 手机飞行模式换 IP");
 
-    // 2. 获取旧 IP
-    let old_ip = get_current_public_ip().await.unwrap_or_else(|| "未知".into());
-    tracing::info!(old_ip = %old_ip, "换 IP 前出口 IP");
+    // 2. 获取旧 IP（优先探测真机自身蜂窝公网 IP，彻底防止电脑端 VPN/代理干扰）
+    let old_ip = get_phone_or_public_ip(sdk_dir, Some(&target_serial)).await.unwrap_or_else(|| "未知".into());
+    tracing::info!(old_ip = %old_ip, "换 IP 前手机公网 IP");
 
     let run_adb = |args: &[&str]| {
         let mut cmd = Command::new(&bin);
@@ -294,7 +326,7 @@ pub async fn rotate_ip_via_adb(
                 return Err("换 IP 过程被用户取消".into());
             }
         }
-        if let Some(ip) = get_current_public_ip().await {
+        if let Some(ip) = get_phone_or_public_ip(sdk_dir, Some(&target_serial)).await {
             new_ip = Some(ip);
             break;
         }

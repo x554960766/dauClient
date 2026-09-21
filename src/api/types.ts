@@ -36,11 +36,23 @@ export interface EngineConfig {
   enable_stack_mode?: boolean;
   app_label?: string;
   auto_rotate_ip?: boolean;
+  rotate_ip_interval_min?: number;
+  rotate_ip_interval_max?: number;
   rotate_ip_serial?: string | null;
   rotate_ip_disconnect_wait_s?: number;
   rotate_ip_reconnect_wait_s?: number;
   rotate_ip_hotspot_ssid?: string | null;
   rotate_ip_hotspot_password?: string | null;
+  time_window_enabled?: boolean;
+  time_window_start?: string;
+  time_window_end?: string;
+}
+
+export interface TimeWindowStatus {
+  waiting: boolean;
+  start: string;
+  end: string;
+  message: string;
 }
 
 export interface UsbPhoneInfo {

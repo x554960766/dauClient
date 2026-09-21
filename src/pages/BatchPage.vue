@@ -55,17 +55,84 @@
           </n-gi>
         </n-grid>
 
+        <n-form-item label="执行时间范围">
+          <n-space vertical style="width: 100%">
+            <n-space align="center">
+              <n-switch v-model:value="app.config.time_window_enabled" />
+              <n-text style="font-weight: 500">只在设置的时间范围内执行（基于北京时间）</n-text>
+              <template v-if="app.config.time_window_enabled">
+                <n-time-picker
+                  v-model:formatted-value="app.config.time_window_start"
+                  value-format="HH:mm"
+                  format="HH:mm"
+                  size="small"
+                  placeholder="起始时间"
+                  style="width: 130px"
+                />
+                <span>至</span>
+                <n-time-picker
+                  v-model:formatted-value="app.config.time_window_end"
+                  value-format="HH:mm"
+                  format="HH:mm"
+                  size="small"
+                  placeholder="结束时间"
+                  style="width: 130px"
+                />
+                <n-tag :type="isCurrentTimeInWindow ? 'success' : 'warning'" size="small">
+                  {{ isCurrentTimeInWindow ? "当前在时间范围内（可立即执行）" : "当前不在时间范围内（启动后将自动等待进入窗口）" }}
+                </n-tag>
+              </template>
+            </n-space>
+            <n-text v-if="app.config.time_window_enabled" depth="3" style="font-size: 12px">
+              提示：若放量执行过程中离开设定时间范围，任务将自动暂停调度挂起等待，直到再次进入时间窗口自动恢复，期间支持随时手动停止。
+            </n-text>
+          </n-space>
+        </n-form-item>
+
         <n-form-item label="手机换 IP">
           <n-space vertical style="width: 100%">
             <n-space align="center">
               <n-switch v-model:value="app.config.auto_rotate_ip" @update:value="onRotateIpToggle" />
-              <n-text style="font-weight: 500">每批并发设备完成后，通过手机 USB 飞行模式更换 IP</n-text>
+              <n-text style="font-weight: 500">后台平滑换 IP（每累计完成 60~100 台随机触发，流水线无感过渡）</n-text>
               <n-button size="tiny" secondary :loading="refreshingPhones" @click="refreshPhones">
                 刷新手机
               </n-button>
               <n-button size="tiny" type="info" secondary :loading="testingIp" @click="manualTestRotateIp">
                 测试单次换 IP
               </n-button>
+              <n-tooltip trigger="hover">
+                <template #trigger>
+                  <n-tag
+                    v-if="phonePublicIp"
+                    type="success"
+                    size="small"
+                    :bordered="false"
+                    style="font-family: monospace; font-weight: 600; cursor: pointer"
+                    @click="fetchCurrentPhoneIp"
+                  >
+                    📱 手机公网 IP: {{ phonePublicIp }} 🔄
+                  </n-tag>
+                  <n-tag
+                    v-else-if="fetchingPhoneIp"
+                    type="info"
+                    size="small"
+                    :bordered="false"
+                  >
+                    正在向手机探测公网 IP...
+                  </n-tag>
+                  <n-tag
+                    v-else
+                    type="default"
+                    size="small"
+                    :bordered="false"
+                    style="cursor: pointer"
+                    @click="fetchCurrentPhoneIp"
+                  >
+                    点击获取手机公网 IP
+                  </n-tag>
+                </template>
+                通过已连接的 USB 手机蜂窝网络直接探测到的真实公网 IP（彻底隔离电脑本地 VPN/代理工具），点击可重新检测
+              </n-tooltip>
             </n-space>
 
             <div v-if="app.config.auto_rotate_ip" style="background: rgba(0,0,0,0.02); padding: 8px 12px; border-radius: 6px; border: 1px dashed #d9d9d9">
@@ -78,6 +145,32 @@
                   未检测到 USB 连接的安卓真机（请检查 USB 连线、调试权限与网络共享）
                 </n-tag>
               </n-space>
+
+              <n-grid :cols="2" :x-gap="12" style="margin-bottom: 8px">
+                <n-gi>
+                  <n-form-item label="换 IP 间隔下限 (最小台数)" :show-feedback="false">
+                    <n-input-number
+                      v-model:value="app.config.rotate_ip_interval_min"
+                      :min="1"
+                      :max="app.config.rotate_ip_interval_max || 100"
+                      placeholder="默认 60"
+                      size="small"
+                      style="width: 100%"
+                    />
+                  </n-form-item>
+                </n-gi>
+                <n-gi>
+                  <n-form-item label="换 IP 间隔上限 (最大台数)" :show-feedback="false">
+                    <n-input-number
+                      v-model:value="app.config.rotate_ip_interval_max"
+                      :min="app.config.rotate_ip_interval_min || 1"
+                      placeholder="默认 100"
+                      size="small"
+                      style="width: 100%"
+                    />
+                  </n-form-item>
+                </n-gi>
+              </n-grid>
 
               <n-grid :cols="2" :x-gap="12" style="margin-bottom: 8px">
                 <n-gi>
@@ -104,7 +197,7 @@
 
               <n-space align="center">
                 <n-text depth="3" style="font-size: 12px">
-                  断网保持: {{ app.config.rotate_ip_disconnect_wait_s || 4 }}s ｜ 恢复等待: {{ app.config.rotate_ip_reconnect_wait_s || 6 }}s ｜ 自动守护 USB 网络共享 (RNDIS) 与 Mac Wi-Fi 热点
+                  随机间隔: 累计每 {{ app.config.rotate_ip_interval_min || 60 }} ~ {{ app.config.rotate_ip_interval_max || 100 }} 台换一次 ｜ 断网保持: {{ app.config.rotate_ip_disconnect_wait_s || 4 }}s ｜ 恢复等待: {{ app.config.rotate_ip_reconnect_wait_s || 6 }}s ｜ 虚拟机冷启动完全不阻塞，平滑无感
                 </n-text>
               </n-space>
             </div>
@@ -162,6 +255,11 @@
         <n-statistic label="成功" :value="batch.ok" />
         <n-statistic label="失败" :value="batch.fail" />
         <n-statistic label="友盟 CONNECT 命中" :value="batch.umengHits" />
+        <n-statistic v-if="batch.blockedHits > 0" label="已拦截系统/广告无用流量" :value="batch.blockedHits" />
+        <n-statistic v-if="batch.totalTraffic" label="放行网络流量" :value="batch.totalTraffic" />
+        <n-tag type="success" size="small" style="align-self: center">
+          🛡️ 省流量拦截已开启
+        </n-tag>
         <n-button v-if="batch.done" type="primary" @click="$router.push(`/report/${batch.runId}`)">
           查看报告
         </n-button>
@@ -178,6 +276,18 @@
           </n-tag>
           <n-text v-if="batch.rotateMessage" depth="3" style="font-size: 12px">
             {{ batch.rotateMessage }}
+          </n-text>
+        </n-space>
+      </div>
+
+      <!-- 时间范围等待动态状态条 -->
+      <div v-if="batch.waitingWindow" style="margin-top: 12px; padding: 8px 12px; background: #fffbe6; border-radius: 6px; border: 1px solid #ffe58f">
+        <n-space align="center">
+          <n-tag type="warning" size="small">
+            ⏸️ 时间范围挂起等待中
+          </n-tag>
+          <n-text style="font-size: 13px; color: #d48806; font-weight: 500">
+            {{ batch.windowMessage || `当前不在设定时间范围 [${app.config.time_window_start} - ${app.config.time_window_end}] 内，正在等待进入时间范围...` }}
           </n-text>
         </n-space>
       </div>
@@ -214,10 +324,10 @@
 import { computed, onMounted, ref } from "vue";
 import {
   NAlert, NButton, NCard, NForm, NFormItem, NGi, NGrid, NH2,
-  NInput, NInputNumber, NProgress, NSelect, NSpace, NStatistic, NSwitch, NTag, NText, NTooltip, useMessage,
+  NInput, NInputNumber, NProgress, NSelect, NSpace, NStatistic, NSwitch, NTag, NText, NTimePicker, NTooltip, useMessage,
 } from "naive-ui";
 import { api } from "../api/ipc";
-import { onBatchDevice, onBatchIpStatus, onBatchProgress } from "../api/events";
+import { onBatchDevice, onBatchIpStatus, onBatchProgress, onBatchTimeWindowStatus } from "../api/events";
 import { useAppStore } from "../stores/app";
 import { useBatchStore } from "../stores/batch";
 import ApkDropZone from "../components/ApkDropZone.vue";
@@ -233,6 +343,23 @@ const stackStatus = ref<StackStatusReport | null>(null);
 const detectedPhones = ref<UsbPhoneInfo[]>([]);
 const refreshingPhones = ref(false);
 const testingIp = ref(false);
+const phonePublicIp = ref<string | null>(null);
+const fetchingPhoneIp = ref(false);
+
+async function fetchCurrentPhoneIp() {
+  fetchingPhoneIp.value = true;
+  try {
+    const ip = await api.getCurrentPublicIp(app.config.rotate_ip_serial || undefined);
+    if (ip) {
+      phonePublicIp.value = ip;
+      batch.currentIp = ip;
+    }
+  } catch (e) {
+    // 忽略加载异常
+  } finally {
+    fetchingPhoneIp.value = false;
+  }
+}
 
 const levelOptions = [
   { label: "L1 · pm clear（~3s/台）", value: "L1" },
@@ -280,6 +407,32 @@ const canStart = computed(
     !(apkInfo.value?.blacklist_hit)
 );
 
+const isCurrentTimeInWindow = computed(() => {
+  if (!app.config.time_window_enabled) return true;
+  const startStr = app.config.time_window_start || "08:00";
+  const endStr = app.config.time_window_end || "22:00";
+  const [sh, sm] = startStr.split(":").map(Number);
+  const [eh, em] = endStr.split(":").map(Number);
+  const startMin = (sh || 0) * 60 + (sm || 0);
+  const endMin = (eh || 0) * 60 + (em || 0);
+
+  const parts = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    hour: "numeric",
+    minute: "numeric",
+    hourCycle: "h23",
+  }).formatToParts(new Date());
+  const bjHour = Number(parts.find((p) => p.type === "hour")?.value ?? 0);
+  const bjMinute = Number(parts.find((p) => p.type === "minute")?.value ?? 0);
+  const curMin = bjHour * 60 + bjMinute;
+
+  if (startMin <= endMin) {
+    return curMin >= startMin && curMin < endMin;
+  } else {
+    return curMin >= startMin || curMin < endMin;
+  }
+});
+
 async function fetchStackStatus() {
   try {
     stackStatus.value = await api.getStackStatus();
@@ -318,8 +471,16 @@ async function onApkDrop(path: string) {
 }
 
 async function start() {
+  if (app.config.time_window_enabled) {
+    if (!app.config.time_window_start) app.config.time_window_start = "08:00";
+    if (!app.config.time_window_end) app.config.time_window_end = "22:00";
+  }
   const id = await api.batchStart(app.config);
   batch.reset(id);
+  if (app.config.time_window_enabled && !isCurrentTimeInWindow.value) {
+    batch.waitingWindow = true;
+    batch.windowMessage = `当前北京时间不在设定时间范围 [${app.config.time_window_start} - ${app.config.time_window_end}] 内，已暂停调度挂起等待中...`;
+  }
   message.success(`已启动 ${id}`);
 }
 
@@ -332,6 +493,7 @@ async function refreshPhones() {
   refreshingPhones.value = true;
   try {
     detectedPhones.value = await api.detectUsbPhones();
+    await fetchCurrentPhoneIp();
   } catch (e: any) {
     message.error("检测手机失败: " + e);
   } finally {
@@ -342,6 +504,8 @@ async function refreshPhones() {
 async function onRotateIpToggle(enabled: boolean) {
   if (enabled && detectedPhones.value.length === 0) {
     await refreshPhones();
+  } else if (enabled) {
+    await fetchCurrentPhoneIp();
   }
 }
 
@@ -358,6 +522,7 @@ async function manualTestRotateIp() {
     if (res.success) {
       message.success(res.message);
       batch.currentIp = res.new_ip;
+      phonePublicIp.value = res.new_ip;
     } else {
       message.warning(res.message);
     }
@@ -380,8 +545,15 @@ onMounted(async () => {
   });
   await onBatchIpStatus((s) => {
     batch.onIpStatus(s);
+    if (s.ip) {
+      phonePublicIp.value = s.ip;
+    }
+  });
+  await onBatchTimeWindowStatus((s) => {
+    batch.onTimeWindowStatus(s);
   });
   refreshPhones();
+  fetchCurrentPhoneIp();
 });
 </script>
 

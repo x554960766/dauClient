@@ -68,6 +68,9 @@ pub fn run() {
                             .collect();
                         if !ours.is_empty() {
                             tracing::info!(count = ours.len(), "应用启动：自动清理上次异常挂掉遗留的 AVD: {:?}", ours);
+                            for port in [5554, 5556, 5558, 5560] {
+                                let _ = adb.emu_kill(&format!("emulator-{}", port)).await;
+                            }
                             for name in &ours {
                                 let _ = avdm.delete(name).await;
                                 crate::avd::clean_avd_lock_files(name);
@@ -102,6 +105,7 @@ pub fn run() {
             commands::reset_profile_usage,
             commands::detect_usb_phones,
             commands::test_rotate_ip,
+            commands::get_current_public_ip,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

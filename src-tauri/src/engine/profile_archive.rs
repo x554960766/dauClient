@@ -89,9 +89,10 @@ pub async fn backup_from_device(
     profile_id: &str,
     info: &DeviceProfileInfo,
 ) -> Result<IdentityProfile, AdbError> {
-    let android_id = adb.get_android_id(serial, None).await.unwrap_or_default();
+    let id = crate::identity::extract(adb, serial, pkg, None).await;
+    let android_id = id.android_id;
     let mut shared_prefs = HashMap::new();
-    let mut umid = String::new();
+    let mut umid = id.umid;
 
     // 请求 root 权限以读取私有 Shared Preferences
     if adb.root(serial).await.is_ok() {
@@ -191,7 +192,15 @@ pub async fn restore_to_device(
 /// 注入系统的 settings_ssaid.xml 文件中的包名条目
 pub async fn inject_ssaid(adb: &Adb, serial: &str, pkg: &str, android_id: &str) -> Result<(), AdbError> {
     const SSAID_PATH: &str = "/data/system/users/0/settings_ssaid.xml";
-    let ssaid_xml = adb.shell_read(serial, SSAID_PATH).await.unwrap_or_default();
+    const TMP_XML: &str = "/data/local/tmp/ssaid.xml";
+
+    // 判断是否为 Android 14+ ABX 格式并转换
+    let is_abx = adb.shell(serial, &["abx2xml", SSAID_PATH, TMP_XML]).await.is_ok();
+    let ssaid_xml = if is_abx {
+        adb.shell_read(serial, TMP_XML).await.unwrap_or_default()
+    } else {
+        adb.shell_read(serial, SSAID_PATH).await.unwrap_or_default()
+    };
 
     let new_xml = if ssaid_xml.contains(&format!("package=\"{}\"", pkg)) {
         // 存在则替换该包名的 value 属性
@@ -208,28 +217,46 @@ pub async fn inject_ssaid(adb: &Adb, serial: &str, pkg: &str, android_id: &str) 
         }
         result.join("\n")
     } else {
-        // 不存在则在 </ssaidSettings> 前插入新条目
+        // 不存在则在根节点闭合标签前插入新条目
         let new_entry = format!(
             "  <setting id=\"99\" name=\"10000\" value=\"{}\" package=\"{}\" defaultValue=\"{}\" defaultSysSet=\"false\" tag=\"null\" />",
             android_id, pkg, android_id
         );
         if ssaid_xml.contains("</ssaidSettings>") {
             ssaid_xml.replace("</ssaidSettings>", &format!("{}\n</ssaidSettings>", new_entry))
+        } else if ssaid_xml.contains("</settings>") {
+            ssaid_xml.replace("</settings>", &format!("{}\n</settings>", new_entry))
         } else {
             format!(
-                "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n<ssaidSettings version=\"1\">\n{}\n</ssaidSettings>",
+                "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n<settings version=\"-1\">\n{}\n</settings>",
                 new_entry
             )
         }
     };
 
     let encoded = base64_encode(new_xml.as_bytes());
-    let _ = adb
-        .shell(
-            serial,
-            &["sh", "-c", &format!("echo '{}' | base64 -d > {}", encoded, SSAID_PATH)],
-        )
-        .await;
+    if is_abx {
+        let _ = adb
+            .shell(
+                serial,
+                &[
+                    "sh",
+                    "-c",
+                    &format!(
+                        "echo '{}' | base64 -d > {} && xml2abx {} {} && rm -f {}",
+                        encoded, TMP_XML, TMP_XML, SSAID_PATH, TMP_XML
+                    ),
+                ],
+            )
+            .await;
+    } else {
+        let _ = adb
+            .shell(
+                serial,
+                &["sh", "-c", &format!("echo '{}' | base64 -d > {}", encoded, SSAID_PATH)],
+            )
+            .await;
+    }
 
     // 辅助注入 secure 命名空间（兼容旧 Android）
     let _ = adb

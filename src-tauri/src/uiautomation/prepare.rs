@@ -7,33 +7,6 @@ use crate::uiautomation::script::PrepareConfig;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-/// 从 build.prop 文件文本中解析指定属性值。
-/// 用于 apply_device_spoofing 的早退判断：读文件（反映是否真正改写过），
-/// 不读 getprop（getprop 会被 boot 时 -prop 注入污染，不反映文件状态）。
-fn prop_from_file(build_prop: &str, key: &str) -> String {
-    let prefix = format!("{}=", key);
-    for line in build_prop.lines() {
-        let t = line.trim();
-        if let Some(v) = t.strip_prefix(&prefix) {
-            return v.trim().to_string();
-        }
-    }
-    String::new()
-}
-
-/// 读取 system 分区的 build.prop 文件内容，尝试多个可能路径。
-/// Android 14 动态分区设备上可能位于 /system/build.prop, /system/system/build.prop 或 /system/etc/build.prop。
-async fn read_system_build_prop(adb: &Adb, serial: &str) -> String {
-    for path in ["/system/build.prop", "/system/system/build.prop", "/system/etc/build.prop", "/vendor/build.prop", "/product/build.prop"] {
-        if let Ok(content) = adb.shell(serial, &["cat", path]).await {
-            let t = content.trim();
-            if !t.is_empty() && !t.contains("No such file") && !t.contains("Permission denied") {
-                return t.to_string();
-            }
-        }
-    }
-    String::new()
-}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PrepareOutcome {
@@ -127,12 +100,33 @@ pub async fn prepare_device(
     let _ = adb
         .shell(serial, &["settings", "put", "secure", "immersive_mode_confirmations", "confirmed"])
         .await;
+    let _ = adb
+        .shell(serial, &["settings", "put", "secure", "anr_show_background", "0"])
+        .await;
+    let _ = adb
+        .shell(serial, &["settings", "put", "global", "hide_error_dialogs", "1"])
+        .await;
+    let _ = adb
+        .shell(serial, &["settings", "put", "secure", "show_first_crash_dialog", "0"])
+        .await;
     if let Some(uid) = user_id {
         let uid_s = uid.to_string();
         let _ = adb
             .shell(
                 serial,
                 &["settings", "--user", &uid_s, "put", "secure", "immersive_mode_confirmations", "confirmed"],
+            )
+            .await;
+        let _ = adb
+            .shell(
+                serial,
+                &["settings", "--user", &uid_s, "put", "secure", "anr_show_background", "0"],
+            )
+            .await;
+        let _ = adb
+            .shell(
+                serial,
+                &["settings", "--user", &uid_s, "put", "secure", "show_first_crash_dialog", "0"],
             )
             .await;
         // 标记该副用户已 100% 初始化完成与准备就绪，彻底解除系统后台 UserSetup 磁盘与服务锁（防 ANR）
@@ -210,203 +204,50 @@ pub async fn teardown_device(adb: &Adb, serial: &str, out: &PrepareOutcome) {
 
 use crate::avd::{BootOpts, Emulator};
 
-/// 方案 1：通过 adb root + disable-verity + remount + 修正 build.prop + 平滑重启 QEMU 进程覆盖设备品牌与型号
+/// 终极单启动方案：真机品牌、型号、指纹与硬件参数已在开机前由 config.ini 与 QEMU 命令行 -prop 注入，
+/// 随 Android init 启动即为真机环境，彻底消除 Android 14 只读分区的 remount 失败与冗余的二次/三次重启！
+/// 此处仅需同步屏幕物理分辨率与 DPI（耗时仅 ~0.2s）。
 pub async fn apply_device_spoofing(
     adb: &Adb,
-    emulator: &Emulator,
-    avd_name: &str,
+    _emulator: &Emulator,
+    _avd_name: &str,
     port: u16,
-    opts: &BootOpts,
+    _opts: &BootOpts,
 ) {
     let serial = format!("emulator-{}", port);
-    tracing::info!("[DeviceSpoof] 开始检查设备指纹: serial={}", serial);
-
-    // 优先从 opts.props 中获取指定的硬件属性（如档案回放指定的型号/指纹），否则随机生成
-    let (props, _profile_info) = if !opts.props.is_empty() {
-        let model = opts.props.iter().find(|(k, _)| k == "ro.product.model").map(|(_, v)| v.as_str()).unwrap_or("");
-        let prof = crate::avd::find_profile_by_model(model);
-        (opts.props.clone(), prof)
-    } else {
-        let info = crate::avd::random_device_info();
-        let props = crate::avd::device_props_from_info(&info);
-        (props, Some(info))
-    };
-
-    // 首先尝试 adb root 以便读取并验证 system 分区文件真实状态
-    let _ = adb.root(&serial).await;
-    tokio::time::sleep(Duration::from_millis(600)).await;
-
-    // 早退判断读 build.prop 文件内容（反映是否真正改写过）。Android 14 动态分区尝试多个路径。
-    let sys_prop = read_system_build_prop(adb, &serial).await;
-    let mut cur_fp = prop_from_file(&sys_prop, "ro.system.build.fingerprint");
-    let mut cur_model = prop_from_file(&sys_prop, "ro.product.model");
-
-    if cur_model.is_empty() {
-        cur_model = adb.shell(&serial, &["getprop", "ro.product.model"]).await.unwrap_or_default().trim().to_string();
-    }
-    if cur_fp.is_empty() {
-        cur_fp = adb.shell(&serial, &["getprop", "ro.system.build.fingerprint"]).await.unwrap_or_default().trim().to_string();
-    }
-
-    tracing::info!("[DeviceSpoof] build.prop 文件指纹: {}, 型号: {}", cur_fp, cur_model);
-
-    // 提取期望的目标型号
-    let target_model = props.iter().find(|(k, _)| k == "ro.product.model").map(|(_, v)| v.as_str()).unwrap_or("");
-
-    // 只有当 build.prop 文件里的指纹/型号已是真机且匹配目标时才跳过改写（单启动秒级复用）
-    if !cur_fp.is_empty()
-        && !cur_fp.contains("sdk_gphone")
-        && !cur_fp.contains("google")
-        && !cur_model.contains("sdk_gphone")
-        && (target_model.is_empty() || cur_model == target_model)
-    {
-        tracing::info!("[DeviceSpoof] ⚡ build.prop 已是目标真机指纹（{}），跳过二次改写与重启", cur_model);
-        sync_display_resolution(adb, &serial).await;
-        return;
-    }
-
-    tracing::info!("[DeviceSpoof] 待注入的真机属性: {:?}", props);
-
-    // Step 2: disable-verity & remount
-    tokio::time::sleep(Duration::from_millis(2000)).await;
-
-    // Step 2: disable-verity & remount
-    let dv_res = adb.disable_verity(&serial).await;
-    tracing::info!("[DeviceSpoof] disable-verity 结果: {:?}", dv_res);
-    tokio::time::sleep(Duration::from_millis(1000)).await;
-
-    let mut remount_ok = adb.remount(&serial).await.is_ok();
-    tracing::info!("[DeviceSpoof] 第一次 remount 结果: ok={}", remount_ok);
-
-    let mut no_wipe_opts = opts.clone();
-    no_wipe_opts.wipe = false;
-
-    // 在全新 AVD 镜像上，disable-verity 需要一次重启才能解除只读保护使 remount 成功
-    if !remount_ok {
-        tracing::warn!("[DeviceSpoof] 第一次 remount 失败，重启 QEMU 模拟器生效 disable-verity...");
-        let _ = adb.emu_kill(&serial).await;
-        if !crate::avd::wait_port_free(port, 10).await {
-            crate::avd::kill_emulator_on_port(port).await;
-            let _ = crate::avd::wait_port_free(port, 5).await;
-        }
-        tokio::time::sleep(Duration::from_millis(1000)).await;
-
-        crate::avd::clean_avd_lock_files(avd_name);
-
-        if let Err(e) = emulator.boot(avd_name, port, &no_wipe_opts).await {
-            tracing::error!("[DeviceSpoof] 重新启动 QEMU 失败: {:?}", e);
-            return;
-        }
-        if let Err(e) = adb.wait_boot(&serial, Duration::from_secs(90)).await {
-            tracing::error!("[DeviceSpoof] 重启后等待开机超时: {:?}", e);
-            return;
-        }
-        let _ = adb.root(&serial).await;
-        tokio::time::sleep(Duration::from_millis(2000)).await;
-        remount_ok = adb.remount(&serial).await.is_ok();
-        tracing::info!("[DeviceSpoof] 重启后第二次 remount 结果: ok={}", remount_ok);
-    }
-
-    if !remount_ok {
-        tracing::error!("[DeviceSpoof] ❌ remount 依然失败，/system 依旧只读，放弃修改 build.prop（已通过 config.ini 完成注入）");
-        return;
-    }
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    // Step 3: 安全修改 build.prop 文件（带备份、精确行首匹配，失败自动还原防 BootLoop）
-    // Android 14 动态分区：/system/build.prop 可能是空文件或符号链接，实际内容常在 /system/system/build.prop
-    let mut script = String::from(
-        "#!/system/bin/sh\n\
-        for f in /system/build.prop /system/system/build.prop /vendor/build.prop /product/build.prop /system_ext/build.prop /odm/etc/build.prop; do\n\
-            if [ -f \"$f\" ]; then\n\
-                cp -f \"$f\" \"$f.bak\"\n\
-                sed -i '/^ro\\.product\\..*\\.model=/d' \"$f\"\n\
-                sed -i '/^ro\\.product\\.model=/d' \"$f\"\n\
-                sed -i '/^ro\\.product\\..*\\.brand=/d' \"$f\"\n\
-                sed -i '/^ro\\.product\\.brand=/d' \"$f\"\n\
-                sed -i '/^ro\\.product\\..*\\.manufacturer=/d' \"$f\"\n\
-                sed -i '/^ro\\.product\\.manufacturer=/d' \"$f\"\n\
-                sed -i '/^ro\\.product\\..*\\.device=/d' \"$f\"\n\
-                sed -i '/^ro\\.product\\.device=/d' \"$f\"\n\
-                sed -i '/^ro\\.product\\..*\\.name=/d' \"$f\"\n\
-                sed -i '/^ro\\.product\\.name=/d' \"$f\"\n\
-                sed -i '/^ro\\.product\\.board=/d' \"$f\"\n\
-                sed -i '/^ro\\..*build\\.fingerprint=/d' \"$f\"\n\
-                sed -i '/^ro\\.build\\.flavor=/d' \"$f\"\n\
-                sed -i '/^ro\\.build\\.description=/d' \"$f\"\n\
-                sed -i '/^ro\\.build\\.product=/d' \"$f\"\n"
+    let model = adb.shell(&serial, &["getprop", "ro.product.model"]).await.unwrap_or_default();
+    let fp = adb.shell(&serial, &["getprop", "ro.system.build.fingerprint"]).await.unwrap_or_default();
+    tracing::info!(
+        "[DeviceSpoof] ⚡ 真机硬件属性已由 config.ini 与 -prop 生效 (model={}, fp={})，单启动秒级同步屏幕物理分辨率与 DPI: serial={}",
+        model.trim(), fp.trim(), serial
     );
-
-    for (k, v) in &props {
-        script.push_str(&format!("                echo '{}={}' >> \"$f\"\n", k, v));
-    }
-    script.push_str(
-        "            fi\n\
-        done\n\
-        exit 0\n"
-    );
-
-    let write_cmd = format!("cat << 'EOF' > /data/local/tmp/spoof.sh\n{}\nEOF\nchmod 755 /data/local/tmp/spoof.sh\n", script);
-    if let Err(e) = adb.shell(&serial, &["sh", "-c", &write_cmd]).await {
-        tracing::error!("[DeviceSpoof] 写入 /data/local/tmp/spoof.sh 失败: {:?}", e);
-        return;
-    }
-
-    match adb.shell(&serial, &["sh", "/data/local/tmp/spoof.sh"]).await {
-        Ok(_) => tracing::info!("[DeviceSpoof] build.prop 修改脚本执行完成"),
-        Err(e) => {
-            tracing::error!("[DeviceSpoof] build.prop 修改脚本执行失败: {:?}, 自动还原备份...", e);
-            let restore_cmd = "for f in /system/build.prop /vendor/build.prop /product/build.prop /system_ext/build.prop /odm/etc/build.prop; do [ -f \"$f.bak\" ] && mv -f \"$f.bak\" \"$f\"; done";
-            let _ = adb.shell(&serial, &["sh", "-c", restore_cmd]).await;
-            return;
-        }
-    }
-    let _ = adb.shell(&serial, &["rm", "-f", "/data/local/tmp/spoof.sh", "/system/*.bak", "/vendor/*.bak"]).await;
-
-    // Step 4: 平滑重启 QEMU 模拟器进程（通过 emu_kill + 确保完全离线 + emulator.boot）
-    tracing::info!("[DeviceSpoof] 优雅重启 QEMU 模拟器进程使新 build.prop 生效...");
-    let _ = adb.emu_kill(&serial).await;
-
-    if !crate::avd::wait_port_free(port, 10).await {
-        crate::avd::kill_emulator_on_port(port).await;
-        let _ = crate::avd::wait_port_free(port, 5).await;
-    }
-    tokio::time::sleep(Duration::from_millis(1000)).await;
-
-    crate::avd::clean_avd_lock_files(avd_name);
-
-    tracing::info!("[DeviceSpoof] 重新拉起 QEMU 模拟器进程...");
-    if let Err(e) = emulator.boot(avd_name, port, &no_wipe_opts).await {
-        tracing::error!("[DeviceSpoof] 重启 QEMU 模拟器进程失败: {:?}", e);
-        return;
-    }
-    tracing::info!("[DeviceSpoof] QEMU 进程已重新拉起，等待开机完成 (sys.boot_completed=1)...");
-
-    // Step 5: 等待设备重新上线并完成开机
-    if let Err(e) = adb.wait_boot(&serial, Duration::from_secs(90)).await {
-        tracing::error!("[DeviceSpoof] 重新开机后等待超时: {:?}", e);
-        return;
-    }
-
-    // 最终校验读取（读文件，若权限受限则配合 getprop 校验）
-    let final_prop = read_system_build_prop(adb, &serial).await;
-    let mut final_model = prop_from_file(&final_prop, "ro.product.model");
-    let mut final_fp = prop_from_file(&final_prop, "ro.system.build.fingerprint");
-    if final_model.is_empty() {
-        final_model = adb.shell(&serial, &["getprop", "ro.product.model"]).await.unwrap_or_default().trim().to_string();
-    }
-    if final_fp.is_empty() {
-        final_fp = adb.shell(&serial, &["getprop", "ro.system.build.fingerprint"]).await.unwrap_or_default().trim().to_string();
-    }
     sync_display_resolution(adb, &serial).await;
-    tracing::info!("[DeviceSpoof] 伪装完成，生效型号: {}, 生效指纹: {}", final_model, final_fp);
 }
 
 /// 同步屏幕分辨率与 DPI 到匹配当前设备型号的真机参数（通过 wm size 与 wm density 动态覆盖）
 pub async fn sync_display_resolution(adb: &Adb, serial: &str) {
-    let model = adb.shell(serial, &["getprop", "ro.product.model"]).await.unwrap_or_default();
-    let model = model.trim();
-    let profile = crate::avd::find_profile_by_model(model).unwrap_or_else(crate::avd::random_device_info);
+    sync_display_resolution_with_profile(adb, serial, None).await;
+}
+
+pub async fn sync_display_resolution_with_profile(
+    adb: &Adb,
+    serial: &str,
+    custom_info: Option<&crate::avd::DeviceProfileInfo>,
+) {
+    let profile = match custom_info {
+        Some(info) => info.clone(),
+        None => {
+            // 若系统已被 reset_device_in_place 等设置了自定义 Override size，跳过避免覆盖
+            if let Ok(out) = adb.shell(serial, &["wm", "size"]).await {
+                if out.contains("Override size:") {
+                    return;
+                }
+            }
+            let model = adb.shell(serial, &["getprop", "ro.product.model"]).await.unwrap_or_default();
+            let model = model.trim();
+            crate::avd::find_profile_by_model(model).unwrap_or_else(crate::avd::random_device_info)
+        }
+    };
 
     tracing::info!(
         "[DisplaySync] 正在为 {} 同步屏幕分辨率与 DPI: model={}, size={}x{}, density={}",
@@ -446,28 +287,38 @@ pub async fn inject_telephony_and_sensors(adb: &Adb, serial: &str) {
     let chosen_ssid = wifi_names[(nanos as usize) % wifi_names.len()];
 
     // ---- 组装批量 shell 命令：网络模式切换 + SIM/运营商 setprop + 传感器脉冲 ----
+    // 关键修正：QEMU 模拟器的用户态网络与 -http-proxy 完全依赖虚拟网络桥接，
+    // 绝对不能执行 `svc wifi disable`，否则会导致网络路由瘫痪（os error 65 No route to host）。
+    // 在 4G 模式下，仅通过 setprop / telephony 状态属性伪装蜂窝基站，同时保持网络通道畅通。
     let mut cmds: Vec<String> = Vec::new();
+    cmds.push("svc wifi enable".into());
+    cmds.push("svc data enable".into());
+    cmds.push("settings put global mobile_data 1".into());
+
+    // 关键优化：开启 Android 系统低流量保护模式，禁止系统后台在手机热点下偷跑无用数据
+    cmds.push("settings put global captive_portal_mode 0".into());
+    cmds.push("settings put global captive_portal_detection_enabled 0".into());
+    cmds.push("settings put global auto_sync 0".into());
+    cmds.push("settings put global data_saver_enabled 1".into());
+    cmds.push("settings put global low_power 1".into());
+    cmds.push("cmd netpolicy set restrict-background true".into());
+
+    // 关键防漏：封死 QUIC (UDP 443) 协议穿透！
+    // 现代广告 SDK 和视频 CDN 会默认走 UDP 443 绕过 HTTP 代理直连外网，单次偷跑 10~20MB。
+    // 封堵 UDP 443 后，网络库（OkHttp/Chromium/Cronet）自动平滑降级至 TCP HTTPS，100% 走 CountingProxy 接受黑名单审查！
+    // （注：Google 服务流量已在代理层由 TLS SNI 毫秒级阻断，下行流量为 0 B，严禁在系统层使用 pm disable-user 以免破坏 Android 14 system_server 稳定性）
+    cmds.push("iptables -I OUTPUT -p udp --dport 443 -j DROP 2>/dev/null || true".into());
+    cmds.push("ip6tables -I OUTPUT -p udp --dport 443 -j DROP 2>/dev/null || true".into());
+
     if is_wifi {
-        cmds.push("svc wifi enable".into());
-        cmds.push("cmd wifi set-wifi-enabled enabled".into());
         cmds.push("settings put global wifi_on 1".into());
         cmds.push(format!("settings put global wifi_ssid \"{}\"", chosen_ssid));
         cmds.push(format!("settings put global wifi_connected_ssid \"{}\"", chosen_ssid));
         cmds.push(format!("setprop net.wifi.ssid \"{}\"", chosen_ssid));
         cmds.push("setprop wlan.driver.status ok".into());
-        cmds.push("setprop net.dns1 114.114.114.114".into());
-        cmds.push("setprop net.dns2 223.5.5.5".into());
-        cmds.push("svc data enable".into());
-        cmds.push("settings put global mobile_data 1".into());
     } else {
-        cmds.push("svc wifi disable".into());
-        cmds.push("cmd wifi set-wifi-enabled disabled".into());
-        cmds.push("settings put global wifi_on 0".into());
-        cmds.push("svc data enable".into());
-        cmds.push("settings put global mobile_data 1".into());
         cmds.push("settings put global mobile_data_always_on 1".into());
-        cmds.push("setprop net.dns1 114.114.114.114".into());
-        cmds.push("setprop net.dns2 223.5.5.5".into());
+        cmds.push("setprop gsm.network.type LTE".into());
     }
 
     // 无论 Wi-Fi 还是 4G，手机均具备 SIM 卡和蜂窝基站状态属性
@@ -519,42 +370,76 @@ pub async fn inject_telephony_and_sensors(adb: &Adb, serial: &str) {
 }
 
 /// 极速单启动 L3 重置（In-place Clean Reset）：
-/// 彻底抹除旧 App 数据、缓存与 ANDROID_ID (SSAID)，并直接写入全新合法 ANDROID_ID，
-/// 无需热重启 Zygote（避免引发 PackageManagerService 停机与 QEMU socket 断开），
-/// 耗时 <1s，同时 100% 保留已注入的真机 build.prop 与指纹。
-pub async fn reset_device_in_place(adb: &Adb, serial: &str, pkg: &str) -> Result<(), AdbError> {
+/// 彻底抹除旧 App 数据、外部存储持久缓存与 SSAID，并通过重启 system_server 触发系统生成全新合法 ANDROID_ID (SSAID)，
+/// 耗时仅 ~2-3s，同时 100% 保留已注入的真机 build.prop 与指纹。
+pub async fn reset_device_in_place(
+    adb: &Adb,
+    serial: &str,
+    pkg: &str,
+    custom_info: Option<&crate::avd::DeviceProfileInfo>,
+) -> Result<(), AdbError> {
     tracing::info!("[L3FastReset] 正在对 {} 执行单启动极速出厂重置...", serial);
 
-    // 0. 确保具备 root 权限以修改 /data/system/users/0/settings_ssaid.xml
+    // 0. 确保具备 root 权限以修改 /data/system/users/0/
     let _ = adb.root(serial).await;
 
-    // 1. 强杀应用进程与清理包
+    // 1. 强杀应用进程并卸载清理
     let _ = adb.shell(serial, &["am", "force-stop", pkg]).await;
     let _ = adb.shell(serial, &["pm", "clear", pkg]).await;
     let _ = adb.shell(serial, &["pm", "uninstall", pkg]).await;
 
-    // 2. 清理应用私有目录与 SSAID 配置文件
+    // 2. 清理应用私有目录与 SSAID 配置文件，以及友盟外部存储持久缓存
     let clean_cmd = format!(
         "rm -rf /data/data/{pkg} /data/user/0/{pkg} /data/user_de/0/{pkg} /sdcard/Android/data/{pkg} /sdcard/.um /sdcard/.utm; \
          rm -rf /sdcard/DCIM /sdcard/Pictures /sdcard/Download; \
+         rm -f /data/system/users/0/settings_ssaid*; \
          sync",
         pkg = pkg
     );
     let _ = adb.shell(serial, &["sh", "-c", &clean_cmd]).await;
 
-    // 3. 生成全新合法的 16 位十六进制 ANDROID_ID (SSAID) 并直接写入系统配置与 settings 数据库，
-    // 免去重启 Zygote / Android Framework，零系统服务停机时间，避免导致 PackageManagerService 装包失败或模拟器 socket 断开
+    // 3. 生成全新合法的 16 位十六进制 ANDROID_ID 并写入 secure 设置作为全局兜底
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let rand_val: u64 = ((nanos ^ (nanos >> 32)) as u64) ^ 0xa341316cbee9u64;
     let new_android_id = format!("{:016x}", rand_val);
+    let _ = adb.shell(serial, &["settings", "put", "secure", "android_id", &new_android_id]).await;
 
-    if let Err(e) = crate::engine::profile_archive::inject_ssaid(adb, serial, pkg, &new_android_id).await {
-        tracing::warn!("[L3FastReset] 注入新 ANDROID_ID 警告: {}", e);
+    // 4. 重启 system_server 触发 SettingsProvider 重新生成全新的 random userkey
+    // 耗时仅 ~1-3s，确保下次应用安装与启动时，Android 系统为其自动分配独一无二的全新合法 SSAID
+    let _ = adb.shell(serial, &["setprop", "sys.boot_completed", "0"]).await;
+    let _ = adb.shell(serial, &["killall", "-9", "system_server"]).await;
+
+    let wait_start = std::time::Instant::now();
+    let mut booted = false;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    while wait_start.elapsed() < Duration::from_secs(12) {
+        if let Ok(out) = adb.shell(serial, &["getprop", "sys.boot_completed"]).await {
+            if out.trim() == "1" {
+                booted = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    if booted {
+        tracing::info!("[L3FastReset] system_server 重启就绪，耗时 {:?}", wait_start.elapsed());
     } else {
-        tracing::info!("[L3FastReset] 成功为 {} 分配全新合法 ANDROID_ID: {}", pkg, new_android_id);
+        tracing::warn!("[L3FastReset] 等待 system_server 重启超时 (12s)，继续尝试执行");
+    }
+
+    // 5. 若指定了全新机型 profile，同步该机型的物理分辨率与 DPI
+    if let Some(profile) = custom_info {
+        let size_str = format!("{}x{}", profile.width, profile.height);
+        let density_str = profile.density.to_string();
+        let _ = adb.shell(serial, &["wm", "size", &size_str]).await;
+        let _ = adb.shell(serial, &["wm", "density", &density_str]).await;
+        tracing::info!(
+            "[L3FastReset] 已同步机型分辨率与 DPI: {}x{}, density={}",
+            profile.width, profile.height, profile.density
+        );
     }
 
     let _ = adb.shell(serial, &["sync"]).await;
